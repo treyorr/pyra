@@ -1,156 +1,155 @@
-//! Domain service for managed Python version state.
-//!
-//! This crate owns validation and filesystem-facing Python management behavior,
-//! but it intentionally knows nothing about clap or terminal rendering.
+//! Public service facade for managed Python workflows.
 
-use std::fs;
-
-use camino::Utf8PathBuf;
 use pyra_core::AppContext;
 
-use crate::{PythonError, PythonVersionRequest};
+use crate::{
+    HostTarget, InstallDisposition, InstallPythonOutcome, InstallPythonRequest,
+    ListInstalledPythonsOutcome, PythonCatalogClient, PythonError, PythonInstallStore,
+    PythonRelease, SearchPythonOutcome, SearchPythonRequest, UninstallPythonOutcome,
+    UninstallPythonRequest,
+};
 
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct InstalledPython {
-    pub version: PythonVersionRequest,
-    pub path: Utf8PathBuf,
+#[derive(Debug, Clone)]
+pub struct PythonService {
+    catalog: PythonCatalogClient,
+    store: PythonInstallStore,
 }
-
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct InstalledPythonSet {
-    pub versions: Vec<InstalledPython>,
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum InstallDisposition {
-    PreparedPlaceholder,
-    AlreadyPresent,
-}
-
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct InstallPythonOutcome {
-    pub version: PythonVersionRequest,
-    pub install_dir: Utf8PathBuf,
-    pub metadata_file: Utf8PathBuf,
-    pub disposition: InstallDisposition,
-}
-
-#[derive(Debug, Default, Clone, Copy)]
-pub struct PythonService;
 
 impl PythonService {
-    pub fn list_installed(self, context: &AppContext) -> Result<InstalledPythonSet, PythonError> {
-        let install_root = context.paths.python_installations_dir();
-        let entries = match fs::read_dir(&install_root) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(InstalledPythonSet {
-                    versions: Vec::new(),
-                });
-            }
-            Err(source) => {
-                return Err(PythonError::ReadInstallDirectory {
-                    path: install_root.to_string(),
-                    source,
-                });
-            }
-        };
-
-        let mut versions = Vec::new();
-        for entry in entries {
-            let entry = entry.map_err(|source| PythonError::InspectInstallEntry {
-                path: install_root.to_string(),
-                source,
-            })?;
-
-            let file_type =
-                entry
-                    .file_type()
-                    .map_err(|source| PythonError::InspectInstallEntry {
-                        path: install_root.to_string(),
-                        source,
-                    })?;
-            if !file_type.is_dir() {
-                continue;
-            }
-
-            let file_name = entry
-                .file_name()
-                .into_string()
-                .map_err(|name| PythonError::NonUtf8EntryName { name })?;
-            let version = PythonVersionRequest::parse(&file_name).map_err(|_| {
-                PythonError::InvalidInstallEntry {
-                    entry: file_name.clone(),
-                }
-            })?;
-            let path = Utf8PathBuf::from_path_buf(entry.path())
-                .map_err(|path| PythonError::NonUtf8EntryPath { path })?;
-
-            versions.push(InstalledPython { version, path });
+    pub fn new() -> Self {
+        Self {
+            catalog: PythonCatalogClient::new(),
+            store: PythonInstallStore,
         }
-
-        // Stable ordering keeps CLI output deterministic and becomes the natural
-        // base for later "latest installed" resolution rules.
-        versions.sort_by(|left, right| left.version.cmp(&right.version));
-
-        Ok(InstalledPythonSet { versions })
     }
 
-    pub fn install(
-        self,
-        context: &AppContext,
-        version: PythonVersionRequest,
-    ) -> Result<InstallPythonOutcome, PythonError> {
-        let install_dir = context.paths.python_version_dir(version.normalized());
-        let metadata_file = install_dir.join("INSTALLATION_PENDING");
+    #[cfg(test)]
+    pub fn with_api_base_url(api_base_url: impl Into<String>) -> Self {
+        Self {
+            catalog: PythonCatalogClient::with_api_base_url(api_base_url),
+            store: PythonInstallStore,
+        }
+    }
 
-        if install_dir.exists() {
+    #[cfg(test)]
+    pub fn with_catalog_path(catalog_path: impl Into<String>) -> Self {
+        Self {
+            catalog: PythonCatalogClient::with_catalog_path(catalog_path),
+            store: PythonInstallStore,
+        }
+    }
+
+    pub async fn list_installed(
+        &self,
+        context: &AppContext,
+    ) -> Result<ListInstalledPythonsOutcome, PythonError> {
+        let installations = self.store.list_installed(context)?;
+        Ok(ListInstalledPythonsOutcome { installations })
+    }
+
+    pub async fn search(
+        &self,
+        _context: &AppContext,
+        request: SearchPythonRequest,
+    ) -> Result<SearchPythonOutcome, PythonError> {
+        let host = HostTarget::detect()?;
+        let mut releases = self.catalog.fetch_releases(&host).await?;
+        if let Some(selector) = request.selector {
+            releases.retain(|release| selector.matches(&release.version));
+        }
+
+        Ok(SearchPythonOutcome { releases })
+    }
+
+    pub async fn install(
+        &self,
+        context: &AppContext,
+        request: InstallPythonRequest,
+    ) -> Result<InstallPythonOutcome, PythonError> {
+        let host = HostTarget::detect()?;
+        let release = self.resolve_release(&request.selector, &host).await?;
+
+        if let Some(existing) = self
+            .store
+            .read_existing_install(context, &release.version)?
+        {
             return Ok(InstallPythonOutcome {
-                version,
-                install_dir,
-                metadata_file,
-                disposition: InstallDisposition::AlreadyPresent,
+                installation: existing,
+                release,
+                disposition: InstallDisposition::AlreadyInstalled,
             });
         }
 
-        // The initial foundation records intent and layout now so a real download
-        // implementation can later replace this placeholder without changing the
-        // command contract or storage convention.
-        fs::create_dir_all(&install_dir).map_err(|source| PythonError::CreateInstallDirectory {
-            path: install_dir.to_string(),
-            source,
-        })?;
-
-        let metadata = format!(
-            "version = \"{}\"\nstatus = \"placeholder\"\n",
-            version.normalized()
-        );
-        fs::write(&metadata_file, metadata).map_err(|source| PythonError::WriteMetadata {
-            path: metadata_file.to_string(),
-            source,
-        })?;
+        let archive_bytes = self.catalog.download_release(&release).await?;
+        let archive_path = self
+            .store
+            .ensure_cached_archive(context, &release, Some(archive_bytes))
+            .await?;
+        let installation = self
+            .store
+            .activate_install(context, &host, &release, &archive_path)
+            .await?;
 
         Ok(InstallPythonOutcome {
-            version,
-            install_dir,
-            metadata_file,
-            disposition: InstallDisposition::PreparedPlaceholder,
+            installation,
+            release,
+            disposition: InstallDisposition::Installed,
         })
+    }
+
+    pub async fn uninstall(
+        &self,
+        context: &AppContext,
+        request: UninstallPythonRequest,
+    ) -> Result<UninstallPythonOutcome, PythonError> {
+        let installations = self.store.list_installed(context)?;
+        let installation = self
+            .store
+            .select_installed(&installations, &request.selector)?;
+        let removed = self.store.uninstall(&installation)?;
+        Ok(UninstallPythonOutcome { removed })
+    }
+
+    async fn resolve_release(
+        &self,
+        selector: &crate::PythonVersionRequest,
+        host: &HostTarget,
+    ) -> Result<PythonRelease, PythonError> {
+        let releases = self.catalog.fetch_releases(host).await?;
+        releases
+            .into_iter()
+            .find(|release| selector.matches(&release.version))
+            .ok_or_else(|| PythonError::NoMatchingRelease {
+                request: selector.to_string(),
+                host: host.display_name().to_string(),
+            })
+    }
+}
+
+impl Default for PythonService {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use camino::Utf8PathBuf;
+    use flate2::{Compression, write::GzEncoder};
     use pyra_core::{AppContext, AppPaths, Verbosity};
-    use tempfile::tempdir;
 
     use super::PythonService;
-    use crate::PythonVersionRequest;
+    use crate::{
+        InstallDisposition, InstallPythonRequest, PythonVersion, PythonVersionRequest,
+        SearchPythonRequest, UninstallPythonRequest,
+    };
 
-    #[test]
-    fn lists_installed_versions_in_sorted_order() {
-        let temp_dir = tempdir().expect("temporary directory");
+    #[tokio::test]
+    async fn installs_and_lists_managed_python_versions() {
+        let temp_dir = tempfile::tempdir().expect("temporary directory");
+        let fixture = write_catalog_fixture(temp_dir.path(), &["3.13.12"]);
         let root = Utf8PathBuf::from_path_buf(temp_dir.path().to_path_buf()).expect("utf-8 path");
         let paths = AppPaths::from_roots(
             root.join("config"),
@@ -159,25 +158,34 @@ mod tests {
             root.join("state"),
         );
         paths.ensure_base_layout().expect("base layout");
-        std::fs::create_dir_all(paths.python_version_dir("3.12")).expect("python 3.12 dir");
-        std::fs::create_dir_all(paths.python_version_dir("3.11")).expect("python 3.11 dir");
+        let context = AppContext::new(root, paths, Verbosity::Normal);
+        let service = PythonService::with_catalog_path(fixture.catalog_path);
 
-        let context = AppContext::new(root.clone(), paths, Verbosity::Normal);
-        let installed = PythonService
-            .list_installed(&context)
-            .expect("listed installs");
+        let outcome = service
+            .install(
+                &context,
+                InstallPythonRequest {
+                    selector: PythonVersionRequest::parse("3.13").unwrap(),
+                },
+            )
+            .await
+            .expect("install");
 
-        let versions = installed
-            .versions
-            .into_iter()
-            .map(|item| item.version.to_string())
-            .collect::<Vec<_>>();
-        assert_eq!(versions, vec!["3.11", "3.12"]);
+        assert_eq!(outcome.disposition, InstallDisposition::Installed);
+        assert_eq!(
+            outcome.installation.version,
+            PythonVersion::parse("3.13.12").unwrap()
+        );
+
+        let installed = service.list_installed(&context).await.expect("list");
+        assert_eq!(installed.installations.len(), 1);
+        assert!(installed.installations[0].executable_path.exists());
     }
 
-    #[test]
-    fn creates_placeholder_install_metadata() {
-        let temp_dir = tempdir().expect("temporary directory");
+    #[tokio::test]
+    async fn reinstall_is_idempotent() {
+        let temp_dir = tempfile::tempdir().expect("temporary directory");
+        let fixture = write_catalog_fixture(temp_dir.path(), &["3.13.12"]);
         let root = Utf8PathBuf::from_path_buf(temp_dir.path().to_path_buf()).expect("utf-8 path");
         let paths = AppPaths::from_roots(
             root.join("config"),
@@ -186,23 +194,160 @@ mod tests {
             root.join("state"),
         );
         paths.ensure_base_layout().expect("base layout");
+        let context = AppContext::new(root, paths, Verbosity::Normal);
+        let service = PythonService::with_catalog_path(fixture.catalog_path);
 
-        let context = AppContext::new(root.clone(), paths.clone(), Verbosity::Normal);
-        let version = PythonVersionRequest::parse("3.13").expect("valid version");
-        let outcome = PythonService
-            .install(&context, version)
-            .expect("placeholder install");
-
-        assert!(outcome.install_dir.exists());
-        assert!(outcome.metadata_file.exists());
-        assert_eq!(
-            std::fs::read_to_string(
-                paths
-                    .python_version_dir("3.13")
-                    .join("INSTALLATION_PENDING")
+        service
+            .install(
+                &context,
+                InstallPythonRequest {
+                    selector: PythonVersionRequest::parse("3.13").unwrap(),
+                },
             )
-            .expect("metadata"),
-            "version = \"3.13\"\nstatus = \"placeholder\"\n"
+            .await
+            .expect("first install");
+        let second = service
+            .install(
+                &context,
+                InstallPythonRequest {
+                    selector: PythonVersionRequest::parse("3.13").unwrap(),
+                },
+            )
+            .await
+            .expect("second install");
+
+        assert_eq!(second.disposition, InstallDisposition::AlreadyInstalled);
+    }
+
+    #[tokio::test]
+    async fn search_filters_by_selector() {
+        let temp_dir = tempfile::tempdir().expect("temporary directory");
+        let fixture = write_catalog_fixture(temp_dir.path(), &["3.13.12", "3.12.13"]);
+        let root = Utf8PathBuf::from_path_buf(temp_dir.path().to_path_buf()).expect("utf-8 path");
+        let paths = AppPaths::from_roots(
+            root.join("config"),
+            root.join("data"),
+            root.join("cache"),
+            root.join("state"),
         );
+        let context = AppContext::new(root, paths, Verbosity::Normal);
+        let service = PythonService::with_catalog_path(fixture.catalog_path);
+
+        let outcome = service
+            .search(
+                &context,
+                SearchPythonRequest {
+                    selector: Some(PythonVersionRequest::parse("3.13").unwrap()),
+                },
+            )
+            .await
+            .expect("search");
+
+        assert_eq!(outcome.releases.len(), 1);
+        assert_eq!(
+            outcome.releases[0].version,
+            PythonVersion::parse("3.13.12").unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn uninstall_removes_selected_installation() {
+        let temp_dir = tempfile::tempdir().expect("temporary directory");
+        let fixture = write_catalog_fixture(temp_dir.path(), &["3.13.12"]);
+        let root = Utf8PathBuf::from_path_buf(temp_dir.path().to_path_buf()).expect("utf-8 path");
+        let paths = AppPaths::from_roots(
+            root.join("config"),
+            root.join("data"),
+            root.join("cache"),
+            root.join("state"),
+        );
+        paths.ensure_base_layout().expect("base layout");
+        let context = AppContext::new(root, paths, Verbosity::Normal);
+        let service = PythonService::with_catalog_path(fixture.catalog_path);
+
+        let install = service
+            .install(
+                &context,
+                InstallPythonRequest {
+                    selector: PythonVersionRequest::parse("3.13").unwrap(),
+                },
+            )
+            .await
+            .expect("install");
+
+        let outcome = service
+            .uninstall(
+                &context,
+                UninstallPythonRequest {
+                    selector: PythonVersionRequest::parse("3.13.12").unwrap(),
+                },
+            )
+            .await
+            .expect("uninstall");
+
+        assert_eq!(outcome.removed.version, install.installation.version);
+        assert!(!install.installation.install_dir.exists());
+    }
+
+    struct FixturePaths {
+        catalog_path: String,
+    }
+
+    fn write_catalog_fixture(root: &std::path::Path, versions: &[&str]) -> FixturePaths {
+        let archive_path = root.join("python-install.tar.gz");
+        fs::write(&archive_path, install_archive_fixture()).expect("archive fixture");
+        let archive_url = format!("file://{}", archive_path.display());
+        let digest = sha256_hex(&fs::read(&archive_path).expect("archive bytes"));
+
+        let assets = versions
+            .iter()
+            .map(|version| {
+                serde_json::json!({
+                    "name": host_asset_name(version),
+                    "browser_download_url": archive_url,
+                    "digest": format!("sha256:{digest}")
+                })
+            })
+            .collect::<Vec<_>>();
+        let body = serde_json::json!({ "assets": assets });
+        let catalog_path = root.join("catalog.json");
+        fs::write(&catalog_path, serde_json::to_vec_pretty(&body).unwrap()).expect("catalog");
+
+        FixturePaths {
+            catalog_path: catalog_path.display().to_string(),
+        }
+    }
+
+    fn install_archive_fixture() -> Vec<u8> {
+        let mut writer = Vec::new();
+        let encoder = GzEncoder::new(&mut writer, Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+
+        let mut header = tar::Header::new_gnu();
+        let contents = b"python";
+        header.set_path("python/bin/python3").unwrap();
+        header.set_mode(0o755);
+        header.set_size(contents.len() as u64);
+        header.set_cksum();
+        builder.append(&header, &contents[..]).unwrap();
+        builder.finish().unwrap();
+        let encoder = builder.into_inner().unwrap();
+        encoder.finish().unwrap();
+
+        writer
+    }
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+
+        format!("{:x}", Sha256::digest(bytes))
+    }
+
+    fn host_asset_name(version: &str) -> String {
+        let target = crate::HostTarget::detect()
+            .expect("supported host")
+            .target_triple()
+            .to_string();
+        format!("cpython-{version}+20260325-{target}-install_only.tar.gz")
     }
 }

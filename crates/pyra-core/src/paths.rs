@@ -86,6 +86,7 @@ impl AppPaths {
             // Python installations are a first-class part of the long-term data
             // layout, so the base directory exists even before real installs do.
             &self.python_installations_dir(),
+            &self.python_downloads_dir(),
         ] {
             ensure_dir(path)?;
         }
@@ -103,6 +104,14 @@ impl AppPaths {
 
     pub fn python_version_dir(&self, version: &str) -> Utf8PathBuf {
         self.python_installations_dir().join(version)
+    }
+
+    pub fn python_downloads_dir(&self) -> Utf8PathBuf {
+        self.cache_dir.join("python").join("downloads")
+    }
+
+    pub fn python_download_archive(&self, asset_name: &str) -> Utf8PathBuf {
+        self.python_downloads_dir().join(asset_name)
     }
 }
 

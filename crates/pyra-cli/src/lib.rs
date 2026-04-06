@@ -34,12 +34,12 @@ impl UserFacingError for AppError {
     }
 }
 
-pub fn main_entry() -> ExitCode {
+pub async fn main_entry() -> ExitCode {
     let cli = Cli::parse();
     let verbosity = Verbosity::from_occurrences(cli.verbose);
     let mut terminal = Terminal::new(verbosity);
 
-    match run(cli, verbosity, &mut terminal) {
+    match run(cli, verbosity, &mut terminal).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             let _ = terminal.render_error(&error);
@@ -48,13 +48,13 @@ pub fn main_entry() -> ExitCode {
     }
 }
 
-fn run(cli: Cli, verbosity: Verbosity, terminal: &mut Terminal) -> Result<(), AppError> {
+async fn run(cli: Cli, verbosity: Verbosity, terminal: &mut Terminal) -> Result<(), AppError> {
     // The shared app context is the one place where we resolve runtime paths and
     // runtime-wide settings before handing control to feature-specific handlers.
     let context = AppContext::discover(verbosity)?;
     context.paths.ensure_base_layout()?;
 
-    let output = commands::execute(cli.command, &context)?;
+    let output = commands::execute(cli.command, &context).await?;
     // Rendering happens only after command execution has returned a presentation
     // model, which keeps terminal concerns out of domain and orchestration code.
     terminal

@@ -27,17 +27,17 @@ impl UserFacingError for CommandError {
     }
 }
 
-pub fn execute(command: Command, context: &AppContext) -> Result<Output, CommandError> {
+pub async fn execute(command: Command, context: &AppContext) -> Result<Output, CommandError> {
     match command {
-        Command::Python(args) => execute_python(args, context),
-        Command::Init(args) => execute_init(args, context),
+        Command::Python(args) => execute_python(args, context).await,
+        Command::Init(args) => execute_init(args, context).await,
     }
 }
 
-fn execute_python(args: PythonArgs, context: &AppContext) -> Result<Output, CommandError> {
-    python::execute(args, context)
+async fn execute_python(args: PythonArgs, context: &AppContext) -> Result<Output, CommandError> {
+    python::execute(args, context).await
 }
 
-fn execute_init(args: InitArgs, context: &AppContext) -> Result<Output, CommandError> {
+async fn execute_init(args: InitArgs, context: &AppContext) -> Result<Output, CommandError> {
     init::execute(args, context)
 }

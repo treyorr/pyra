@@ -32,13 +32,29 @@ pub struct PythonArgs {
 pub enum PythonCommand {
     /// List the Python versions currently managed by Pyra.
     List,
-    /// Prepare a managed Python install location for a version request.
+    /// Search for installable Python versions for the current host.
+    Search(PythonSearchArgs),
+    /// Download and install a managed Python version for the current host.
     Install(PythonInstallArgs),
+    /// Remove a managed Python installation.
+    Uninstall(PythonUninstallArgs),
 }
 
 #[derive(Debug, Args)]
 pub struct PythonInstallArgs {
     /// Python version request like 3, 3.13, or 3.13.2.
+    pub version: String,
+}
+
+#[derive(Debug, Args)]
+pub struct PythonSearchArgs {
+    /// Optional version selector like 3, 3.13, or 3.13.2.
+    pub version: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct PythonUninstallArgs {
+    /// Installed Python version selector like 3.13.12.
     pub version: String,
 }
 
