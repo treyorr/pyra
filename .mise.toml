@@ -1,0 +1,27 @@
+[tools]
+rust = "stable"
+
+[tasks.fmt]
+description = "Format the Rust workspace"
+run = "cargo fmt --all"
+
+[tasks.fmt-check]
+description = "Check Rust formatting"
+run = "cargo fmt --all --check"
+
+[tasks.check]
+description = "Compile the workspace"
+run = "cargo check --workspace"
+
+[tasks.clippy]
+description = "Lint the workspace"
+run = "cargo clippy --workspace --all-targets -- -D warnings"
+
+[tasks.test]
+description = "Run the Rust test suite"
+run = "cargo test --workspace"
+
+[tasks.verify]
+description = "Run the standard local verification suite"
+depends = ["fmt-check", "clippy", "test"]
+

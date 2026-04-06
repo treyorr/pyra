@@ -1,0 +1,14 @@
+[package]
+name = "pyra-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+camino.workspace = true
+directories.workspace = true
+pyra-errors = { path = "../pyra-errors" }
+serde.workspace = true
+thiserror.workspace = true
+

@@ -1,0 +1,16 @@
+[package]
+name = "pyra-python"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+camino.workspace = true
+pyra-core = { path = "../pyra-core" }
+pyra-errors = { path = "../pyra-errors" }
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+

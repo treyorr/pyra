@@ -1,0 +1,19 @@
+[workspace]
+members = ["crates/*"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+
+[workspace.dependencies]
+anstream = "0.6"
+camino = { version = "1.1", features = ["serde1"] }
+clap = { version = "4.5", features = ["derive", "wrap_help"] }
+directories = "6.0"
+serde = { version = "1.0", features = ["derive"] }
+tempfile = "3.15"
+thiserror = "2.0"
+

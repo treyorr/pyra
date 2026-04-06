@@ -1,0 +1,12 @@
+[package]
+name = "pyra-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anstream.workspace = true
+pyra-core = { path = "../pyra-core" }
+pyra-errors = { path = "../pyra-errors" }
+

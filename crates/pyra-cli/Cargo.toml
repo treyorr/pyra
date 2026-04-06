@@ -1,0 +1,20 @@
+[package]
+name = "pyra-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "pyra"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+pyra-core = { path = "../pyra-core" }
+pyra-errors = { path = "../pyra-errors" }
+pyra-project = { path = "../pyra-project" }
+pyra-python = { path = "../pyra-python" }
+pyra-ui = { path = "../pyra-ui" }
+thiserror.workspace = true
+
