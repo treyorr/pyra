@@ -20,6 +20,8 @@ pub enum Command {
     Python(PythonArgs),
     /// Initialize a new Python project in the current directory.
     Init(InitArgs),
+    /// Pin a managed Python version for the current project.
+    Use(UseArgs),
 }
 
 #[derive(Debug, Args)]
@@ -63,4 +65,10 @@ pub struct InitArgs {
     /// Pin a Pyra-managed Python version in the generated pyproject.toml.
     #[arg(long)]
     pub python: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct UseArgs {
+    /// Python version request like 3, 3.13, or 3.13.2.
+    pub version: String,
 }

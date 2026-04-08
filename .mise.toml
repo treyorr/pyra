@@ -25,3 +25,6 @@ run = "cargo test --workspace"
 description = "Run the standard local verification suite"
 depends = ["fmt-check", "clippy", "test"]
 
+[tasks.build]
+description = "Build the Rust workspace"
+run = "cargo build --workspace"

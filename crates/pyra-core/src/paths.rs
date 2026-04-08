@@ -87,6 +87,7 @@ impl AppPaths {
             // layout, so the base directory exists even before real installs do.
             &self.python_installations_dir(),
             &self.python_downloads_dir(),
+            &self.project_environments_dir(),
         ] {
             ensure_dir(path)?;
         }
@@ -112,6 +113,24 @@ impl AppPaths {
 
     pub fn python_download_archive(&self, asset_name: &str) -> Utf8PathBuf {
         self.python_downloads_dir().join(asset_name)
+    }
+
+    pub fn project_environments_dir(&self) -> Utf8PathBuf {
+        self.data_dir.join("environments")
+    }
+
+    pub fn project_environment_root(&self, project_id: &str) -> Utf8PathBuf {
+        self.project_environments_dir().join(project_id)
+    }
+
+    pub fn project_environment_dir(&self, project_id: &str) -> Utf8PathBuf {
+        self.project_environment_root(project_id)
+            .join("environment")
+    }
+
+    pub fn project_environment_metadata(&self, project_id: &str) -> Utf8PathBuf {
+        self.project_environment_root(project_id)
+            .join("metadata.json")
     }
 }
 
@@ -152,4 +171,38 @@ fn ensure_dir(path: &Utf8Path) -> Result<(), CoreError> {
         path: path.to_string(),
         source,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use camino::Utf8PathBuf;
+
+    use super::AppPaths;
+
+    #[test]
+    fn maps_project_environment_paths_deterministically() {
+        let paths = AppPaths::from_roots(
+            Utf8PathBuf::from("/tmp/config"),
+            Utf8PathBuf::from("/tmp/data"),
+            Utf8PathBuf::from("/tmp/cache"),
+            Utf8PathBuf::from("/tmp/state"),
+        );
+
+        assert_eq!(
+            paths.project_environments_dir(),
+            Utf8PathBuf::from("/tmp/data/environments")
+        );
+        assert_eq!(
+            paths.project_environment_root("abc123"),
+            Utf8PathBuf::from("/tmp/data/environments/abc123")
+        );
+        assert_eq!(
+            paths.project_environment_dir("abc123"),
+            Utf8PathBuf::from("/tmp/data/environments/abc123/environment")
+        );
+        assert_eq!(
+            paths.project_environment_metadata("abc123"),
+            Utf8PathBuf::from("/tmp/data/environments/abc123/metadata.json")
+        );
+    }
 }

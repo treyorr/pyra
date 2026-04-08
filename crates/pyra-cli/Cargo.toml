@@ -21,6 +21,7 @@ tokio.workspace = true
 
 [dev-dependencies]
 assert_cmd = "2.0"
+camino.workspace = true
 flate2.workspace = true
 predicates = "3.1"
 serde_json.workspace = true
