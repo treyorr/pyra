@@ -38,6 +38,26 @@ pub struct ProjectEnvironmentRecord {
 pub struct ProjectEnvironmentStore;
 
 impl ProjectEnvironmentStore {
+    pub fn ensure(
+        self,
+        context: &AppContext,
+        identity: &ProjectIdentity,
+        python: &ProjectPythonSelection,
+    ) -> Result<ProjectEnvironmentRecord, ProjectError> {
+        let metadata_path = context.paths.project_environment_metadata(&identity.id);
+        if metadata_path.exists() {
+            let record = self.read_record(&metadata_path)?;
+            if record.environment_path.exists()
+                && record.python_version == python.installation.version
+                && record.interpreter_path == python.installation.executable_path
+            {
+                return Ok(record);
+            }
+        }
+
+        self.create_or_refresh(context, identity, python)
+    }
+
     pub fn create_or_refresh(
         self,
         context: &AppContext,

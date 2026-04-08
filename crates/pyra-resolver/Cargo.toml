@@ -1,0 +1,19 @@
+[package]
+name = "pyra-resolver"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+indexmap.workspace = true
+pep440_rs.workspace = true
+pep508_rs.workspace = true
+pubgrub.workspace = true
+regex.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+url.workspace = true

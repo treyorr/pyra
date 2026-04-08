@@ -7,9 +7,12 @@ license.workspace = true
 
 [dependencies]
 camino.workspace = true
+pep440_rs.workspace = true
+pep508_rs.workspace = true
 pyra-core = { path = "../pyra-core" }
 pyra-errors = { path = "../pyra-errors" }
 pyra-python = { path = "../pyra-python" }
+pyra-resolver = { path = "../pyra-resolver" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

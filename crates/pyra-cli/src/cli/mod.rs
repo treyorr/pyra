@@ -22,6 +22,8 @@ pub enum Command {
     Init(InitArgs),
     /// Pin a managed Python version for the current project.
     Use(UseArgs),
+    /// Reconcile the centralized environment from `pyproject.toml` and `pylock.toml`.
+    Sync(SyncArgs),
 }
 
 #[derive(Debug, Args)]
@@ -71,4 +73,32 @@ pub struct InitArgs {
 pub struct UseArgs {
     /// Python version request like 3, 3.13, or 3.13.2.
     pub version: String,
+}
+
+#[derive(Debug, Args)]
+pub struct SyncArgs {
+    /// Include a dependency group in addition to the defaults.
+    #[arg(long = "group")]
+    pub groups: Vec<String>,
+    /// Include an extra from `[project.optional-dependencies]`.
+    #[arg(long = "extra")]
+    pub extras: Vec<String>,
+    /// Include all dependency groups.
+    #[arg(long)]
+    pub all_groups: bool,
+    /// Include all extras.
+    #[arg(long)]
+    pub all_extras: bool,
+    /// Exclude a dependency group after applying inclusions.
+    #[arg(long = "no-group")]
+    pub no_groups: Vec<String>,
+    /// Exclude the `dev` dependency group if it exists.
+    #[arg(long)]
+    pub no_dev: bool,
+    /// Sync only the specified dependency groups and exclude base dependencies.
+    #[arg(long = "only-group")]
+    pub only_groups: Vec<String>,
+    /// Sync only the `dev` dependency group and exclude base dependencies.
+    #[arg(long)]
+    pub only_dev: bool,
 }

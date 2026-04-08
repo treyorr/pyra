@@ -4,6 +4,7 @@ mod identity;
 mod init;
 mod pyproject;
 mod service;
+mod sync;
 
 pub use environment::{ProjectEnvironmentRecord, ProjectPythonSelection};
 pub use error::ProjectError;
@@ -12,3 +13,5 @@ pub use service::{
     InitProjectRequest, InitProjectWithPythonOutcome, ProjectService, UseProjectPythonOutcome,
     UseProjectPythonRequest,
 };
+pub use service::{SyncProjectOutcome, SyncProjectRequest};
+pub use sync::SyncSelectionRequest;

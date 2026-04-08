@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use pyra_errors::{ErrorKind, ErrorReport, UserFacingError};
 use pyra_python::PythonError;
+use pyra_resolver::ResolverError;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -90,6 +91,75 @@ pub enum ProjectError {
         #[source]
         source: io::Error,
     },
+    #[error("the current project does not pin a Python version in [tool.pyra]")]
+    PinnedPythonNotConfigured,
+    #[error("the current project is missing [project] metadata")]
+    MissingProjectMetadata,
+    #[error("the current project is missing [project].name")]
+    MissingProjectName,
+    #[error("dependency group `{name}` is not valid")]
+    InvalidDependencyGroupDefinition { name: String },
+    #[error("dependency group `{group}` contains an invalid entry")]
+    InvalidDependencyGroupEntry { group: String },
+    #[error("dependency groups `{first}` and `{second}` normalize to the same name")]
+    DuplicateNormalizedDependencyGroup { first: String, second: String },
+    #[error("dependency group includes unknown group `{name}`")]
+    UnknownIncludedDependencyGroup { name: String },
+    #[error("dependency group expansion found a cycle: {cycle}")]
+    DependencyGroupCycle { cycle: String },
+    #[error("invalid dependency requirement `{value}` in {context}")]
+    InvalidRequirement {
+        context: String,
+        value: String,
+        detail: String,
+    },
+    #[error("invalid dependency value in {context}")]
+    InvalidRequirementValue { context: String },
+    #[error("unknown dependency group `{name}`")]
+    UnknownDependencyGroup { name: String },
+    #[error("unknown optional dependency `{name}`")]
+    UnknownOptionalDependency { name: String },
+    #[error("the pinned Python selector does not match an installed managed interpreter")]
+    PinnedPythonNotInstalled {
+        selector: String,
+        #[source]
+        source: PythonError,
+    },
+    #[error("failed to read pylock.toml at {path}")]
+    ReadLockfile {
+        path: String,
+        #[source]
+        source: io::Error,
+    },
+    #[error("failed to write pylock.toml at {path}")]
+    WriteLockfile {
+        path: String,
+        #[source]
+        source: io::Error,
+    },
+    #[error("failed to parse pylock.toml at {path}")]
+    ParseLockfile { path: String, detail: String },
+    #[error("dependency resolution failed")]
+    ResolveDependencies {
+        #[source]
+        source: ResolverError,
+    },
+    #[error("failed to query installed packages from {interpreter}")]
+    InspectEnvironment { interpreter: String, stderr: String },
+    #[error("failed to install package `{package}` into the environment")]
+    InstallLockedPackage {
+        package: String,
+        interpreter: String,
+        stderr: String,
+    },
+    #[error("failed to remove package `{package}` from the environment")]
+    RemoveLockedPackage {
+        package: String,
+        interpreter: String,
+        stderr: String,
+    },
+    #[error("failed to install the current project into the environment")]
+    InstallEditableProject { interpreter: String, stderr: String },
 }
 
 impl UserFacingError for ProjectError {
@@ -218,6 +288,162 @@ impl UserFacingError for ProjectError {
             .with_detail("Pyra could not persist the centralized environment metadata.")
             .with_suggestion("Check filesystem permissions and retry.")
             .with_verbose_detail(source.to_string()),
+            Self::PinnedPythonNotConfigured => ErrorReport::new(
+                ErrorKind::User,
+                "Pyra could not sync this project because no Python is pinned yet.",
+            )
+            .with_detail("`pyra sync` needs `[tool.pyra].python` so it can resolve and install for one managed interpreter.")
+            .with_suggestion("Run `pyra use <version>` first, then retry `pyra sync`."),
+            Self::MissingProjectMetadata => ErrorReport::new(
+                ErrorKind::User,
+                "Pyra could not find `[project]` metadata in `pyproject.toml`.",
+            )
+            .with_detail("`pyra sync` needs standard project metadata to determine the project name and dependencies.")
+            .with_suggestion("Add a `[project]` table to `pyproject.toml` and retry."),
+            Self::MissingProjectName => ErrorReport::new(
+                ErrorKind::User,
+                "Pyra could not find `[project].name` in `pyproject.toml`.",
+            )
+            .with_detail("The project name is needed for editable installation and lockfile metadata.")
+            .with_suggestion("Add `name = \"...\"` under `[project]` and retry."),
+            Self::InvalidDependencyGroupDefinition { name } => ErrorReport::new(
+                ErrorKind::User,
+                format!("Dependency group `{name}` is not valid."),
+            )
+            .with_detail("Dependency groups must be TOML arrays containing requirement strings or `{ include-group = \"...\" }` entries.")
+            .with_suggestion("Fix the dependency group definition and retry."),
+            Self::InvalidDependencyGroupEntry { group } => ErrorReport::new(
+                ErrorKind::User,
+                format!("Dependency group `{group}` contains an invalid entry."),
+            )
+            .with_detail("Only requirement strings and `{ include-group = \"...\" }` entries are allowed inside `[dependency-groups]`.")
+            .with_suggestion("Fix the group entry and retry."),
+            Self::DuplicateNormalizedDependencyGroup { first, second } => ErrorReport::new(
+                ErrorKind::User,
+                "Two dependency groups normalize to the same name.",
+            )
+            .with_detail("Dependency group names are compared case-insensitively with punctuation normalized, so Pyra cannot keep both groups distinct.")
+            .with_suggestion("Rename one of the groups so their normalized names differ.")
+            .with_verbose_detail(format!("{first} vs {second}")),
+            Self::UnknownIncludedDependencyGroup { name } => ErrorReport::new(
+                ErrorKind::User,
+                format!("Dependency group include `{name}` does not exist."),
+            )
+            .with_detail("Pyra found an `{ include-group = \"...\" }` entry pointing at a group that is not defined.")
+            .with_suggestion("Fix the include target or add the missing group and retry."),
+            Self::DependencyGroupCycle { cycle } => ErrorReport::new(
+                ErrorKind::User,
+                "Dependency group includes form a cycle.",
+            )
+            .with_detail("Dependency groups may include other groups, but the include graph must stay acyclic.")
+            .with_suggestion("Break the include cycle and retry.")
+            .with_verbose_detail(cycle.clone()),
+            Self::InvalidRequirement {
+                context,
+                value,
+                detail,
+            } => ErrorReport::new(
+                ErrorKind::User,
+                format!("Pyra could not parse `{value}`."),
+            )
+            .with_detail(format!("The requirement in {context} is not a valid PEP 508 dependency specifier."))
+            .with_suggestion("Fix the requirement string and retry.")
+            .with_verbose_detail(detail.clone()),
+            Self::InvalidRequirementValue { context } => ErrorReport::new(
+                ErrorKind::User,
+                format!("Pyra found a non-string dependency entry in {context}."),
+            )
+            .with_detail("Project dependencies, optional dependencies, and dependency groups must contain PEP 508 requirement strings.")
+            .with_suggestion("Replace the invalid value with a requirement string and retry."),
+            Self::UnknownDependencyGroup { name } => ErrorReport::new(
+                ErrorKind::User,
+                format!("Dependency group `{name}` is not defined for this project."),
+            )
+            .with_detail("The requested sync selection referenced a dependency group that does not exist.")
+            .with_suggestion("Check the group name in `pyproject.toml` and retry."),
+            Self::UnknownOptionalDependency { name } => ErrorReport::new(
+                ErrorKind::User,
+                format!("Extra `{name}` is not defined for this project."),
+            )
+            .with_detail("The requested sync selection referenced an extra that does not exist under `[project.optional-dependencies]`.")
+            .with_suggestion("Check the extra name in `pyproject.toml` and retry."),
+            Self::PinnedPythonNotInstalled { selector, source } => ErrorReport::new(
+                ErrorKind::User,
+                "Pyra could not find the pinned managed Python interpreter.",
+            )
+            .with_detail("`pyra sync` only installs into a Pyra-managed interpreter selected for this project.")
+            .with_suggestion(format!("Install the pinned interpreter with `pyra python install {selector}` or repin the project with `pyra use`."))
+            .with_verbose_detail(source.to_string()),
+            Self::ReadLockfile { path, source } => ErrorReport::new(
+                ErrorKind::System,
+                format!("Pyra could not read `{path}`."),
+            )
+            .with_detail("The project lock file exists, but Pyra could not read it.")
+            .with_suggestion("Check filesystem permissions and retry.")
+            .with_verbose_detail(source.to_string()),
+            Self::WriteLockfile { path, source } => ErrorReport::new(
+                ErrorKind::System,
+                format!("Pyra could not write `{path}`."),
+            )
+            .with_detail("Pyra resolved the project successfully but could not persist `pylock.toml`.")
+            .with_suggestion("Check filesystem permissions and retry.")
+            .with_verbose_detail(source.to_string()),
+            Self::ParseLockfile { path, detail } => ErrorReport::new(
+                ErrorKind::User,
+                format!("Pyra could not parse `{path}`."),
+            )
+            .with_detail("The lock file is not valid for Pyra's current sync implementation.")
+            .with_suggestion("Delete the lock file and rerun `pyra sync` to regenerate it.")
+            .with_verbose_detail(detail.clone()),
+            Self::ResolveDependencies { source } => ErrorReport::new(
+                ErrorKind::User,
+                "Pyra could not resolve a compatible dependency set.",
+            )
+            .with_detail("The project dependency inputs could not be locked for the selected interpreter and current platform.")
+            .with_suggestion("Adjust the declared dependency constraints and retry.")
+            .with_verbose_detail(source.to_string()),
+            Self::InspectEnvironment {
+                interpreter,
+                stderr,
+            } => ErrorReport::new(
+                ErrorKind::System,
+                "Pyra could not inspect the centralized environment state.",
+            )
+            .with_detail("Pyra asks the environment's Python to report currently installed distributions before applying an exact sync.")
+            .with_suggestion("Retry the sync. If the problem persists, recreate the environment with `pyra use <version>` and retry.")
+            .with_verbose_detail(format!("interpreter: {interpreter}\nstderr: {stderr}")),
+            Self::InstallLockedPackage {
+                package,
+                interpreter,
+                stderr,
+            } => ErrorReport::new(
+                ErrorKind::System,
+                format!("Pyra could not install `{package}` from the lock."),
+            )
+            .with_detail("Pyra selected a locked artifact, but the installer backend failed while applying it.")
+            .with_suggestion("Retry the sync. If the failure persists, inspect the package artifact or regenerate the lock.")
+            .with_verbose_detail(format!("interpreter: {interpreter}\nstderr: {stderr}")),
+            Self::RemoveLockedPackage {
+                package,
+                interpreter,
+                stderr,
+            } => ErrorReport::new(
+                ErrorKind::System,
+                format!("Pyra could not remove `{package}` during exact sync."),
+            )
+            .with_detail("Pyra removes packages not present in the selected lock subset to keep the centralized environment exact.")
+            .with_suggestion("Retry the sync. If the problem persists, recreate the environment and retry.")
+            .with_verbose_detail(format!("interpreter: {interpreter}\nstderr: {stderr}")),
+            Self::InstallEditableProject {
+                interpreter,
+                stderr,
+            } => ErrorReport::new(
+                ErrorKind::System,
+                "Pyra could not install the current project editable.",
+            )
+            .with_detail("The project declares a build system, so Pyra attempted an editable install after syncing locked dependencies.")
+            .with_suggestion("Check the project's build backend configuration and retry.")
+            .with_verbose_detail(format!("interpreter: {interpreter}\nstderr: {stderr}")),
         }
     }
 }

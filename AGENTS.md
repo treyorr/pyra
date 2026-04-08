@@ -28,6 +28,37 @@ Do not optimize for short-term hacking at the expense of long-term clarity.
 
 ---
 
+## Docs First Rule
+
+Pyra's `docs/` directory is part of the product architecture, not optional background material.
+
+Before changing behavior, adding commands, or extending an existing subsystem, contributors and coding agents must:
+
+1. read the relevant docs in `docs/`
+2. follow the documented model unless the change is intentionally updating that model
+3. update the docs in the same change when behavior, boundaries, semantics, or guarantees change
+
+When code and docs appear to disagree, do not silently pick one and move on. Investigate the mismatch, resolve it intentionally, and leave both in sync.
+
+Current high-priority architecture references include:
+
+- `docs/README.md`
+- `docs/pyproject-contract.md`
+- `docs/environment-model.md`
+- `docs/sync-model.md`
+- `docs/group-semantics.md`
+- `docs/lock-format-notes.md`
+- `docs/resolution-scope.md`
+- `docs/installer-boundary.md`
+- `docs/add-remove-model.md`
+- `docs/run-model.md`
+- `docs/error-model.md`
+- `docs/testing-strategy.md`
+
+Future agents should start with `docs/README.md`, follow its reading map to the relevant contract docs, and treat those docs as the first source of truth for product behavior and architecture before confirming implementation details in code.
+
+---
+
 ## Core Architecture Rules
 
 Pyra must maintain strict separation between:
@@ -302,9 +333,11 @@ When making changes as an automated coding agent:
 3. Do not move domain logic into clap structs
 4. Do not add shortcut abstractions that weaken architecture
 5. Keep changes narrow and intentional
-6. Add or update comments in the code when behavior, boundaries, or intent would otherwise be easy to misread
-7. Update docs when architecture changes
-8. Prefer completing one vertical slice cleanly over partially scaffolding many things
+6. Read the relevant files in `docs/` before making architectural or behavioral changes
+7. Add or update comments in the code when behavior, boundaries, or intent would otherwise be easy to misread
+8. Update docs when architecture changes
+9. Keep code and docs aligned; do not leave semantic drift behind
+10. Prefer completing one vertical slice cleanly over partially scaffolding many things
 
 When uncertain, choose the simpler structure with clearer boundaries.
 

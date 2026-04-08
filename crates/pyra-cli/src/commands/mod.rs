@@ -1,6 +1,7 @@
 mod init;
 mod project_python;
 mod python;
+mod sync;
 mod use_python;
 
 use pyra_core::AppContext;
@@ -10,7 +11,7 @@ use pyra_python::PythonError;
 use pyra_ui::Output;
 use thiserror::Error;
 
-use crate::cli::{Command, InitArgs, PythonArgs, UseArgs};
+use crate::cli::{Command, InitArgs, PythonArgs, SyncArgs, UseArgs};
 
 #[derive(Debug, Error)]
 pub enum CommandError {
@@ -34,6 +35,7 @@ pub async fn execute(command: Command, context: &AppContext) -> Result<Output, C
         Command::Python(args) => execute_python(args, context).await,
         Command::Init(args) => execute_init(args, context).await,
         Command::Use(args) => execute_use(args, context).await,
+        Command::Sync(args) => execute_sync(args, context).await,
     }
 }
 
@@ -47,4 +49,8 @@ async fn execute_init(args: InitArgs, context: &AppContext) -> Result<Output, Co
 
 async fn execute_use(args: UseArgs, context: &AppContext) -> Result<Output, CommandError> {
     use_python::execute(args, context).await
+}
+
+async fn execute_sync(args: SyncArgs, context: &AppContext) -> Result<Output, CommandError> {
+    sync::execute(args, context).await
 }
