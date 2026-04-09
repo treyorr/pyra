@@ -159,6 +159,50 @@ pub enum ProjectError {
     },
     #[error("failed to query installed packages from {interpreter}")]
     InspectEnvironment { interpreter: String, detail: String },
+    #[error("failed to create locked artifact directory at {path}")]
+    PrepareArtifactDirectory {
+        path: String,
+        #[source]
+        source: io::Error,
+    },
+    #[error("failed to download locked artifact from {url}")]
+    DownloadLockedArtifact {
+        url: String,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("failed to read locked artifact from {path}")]
+    ReadLockedArtifact {
+        path: String,
+        #[source]
+        source: io::Error,
+    },
+    #[error("failed to write locked artifact at {path}")]
+    WriteLockedArtifact {
+        path: String,
+        #[source]
+        source: io::Error,
+    },
+    #[error("failed to activate verified artifact from {from} to {to}")]
+    PromoteLockedArtifact {
+        from: String,
+        to: String,
+        #[source]
+        source: io::Error,
+    },
+    #[error("failed to remove artifact file at {path}")]
+    RemoveArtifactFile {
+        path: String,
+        #[source]
+        source: io::Error,
+    },
+    #[error("downloaded artifact hash did not match for `{package}`")]
+    LockedArtifactHashMismatch {
+        package: String,
+        artifact: String,
+        expected: String,
+        actual: String,
+    },
     #[error("failed to install package `{package}` into the environment")]
     InstallLockedPackage {
         package: String,
@@ -460,6 +504,62 @@ impl UserFacingError for ProjectError {
             .with_detail("Pyra asks the environment's Python to report currently installed distributions before applying an exact sync.")
             .with_suggestion("Retry the sync. If the problem persists, recreate the environment with `pyra use <version>` and retry.")
             .with_verbose_detail(format!("interpreter: {interpreter}\ndetail: {detail}")),
+            Self::PrepareArtifactDirectory { path, source } => ErrorReport::new(
+                ErrorKind::System,
+                format!("Pyra could not prepare `{path}`."),
+            )
+            .with_detail("Pyra could not create the cache directory used for verified locked artifacts.")
+            .with_suggestion("Check filesystem permissions and available disk space, then retry.")
+            .with_verbose_detail(source.to_string()),
+            Self::DownloadLockedArtifact { url, source } => ErrorReport::new(
+                ErrorKind::System,
+                "Pyra could not download a locked package artifact.",
+            )
+            .with_detail("Sync selected an artifact from `pylock.toml`, but the download failed before hash verification.")
+            .with_suggestion("Check the artifact source and your network connection, then retry.")
+            .with_verbose_detail(format!("{url}: {source}")),
+            Self::ReadLockedArtifact { path, source } => ErrorReport::new(
+                ErrorKind::System,
+                format!("Pyra could not read `{path}`."),
+            )
+            .with_detail("Sync selected a local artifact source or cached artifact, but Pyra could not read it for verification.")
+            .with_suggestion("Check that the local artifact still exists and retry.")
+            .with_verbose_detail(source.to_string()),
+            Self::WriteLockedArtifact { path, source } => ErrorReport::new(
+                ErrorKind::System,
+                format!("Pyra could not write `{path}`."),
+            )
+            .with_detail("Pyra downloaded and verified an artifact but could not stage it under the local cache.")
+            .with_suggestion("Check filesystem permissions and available disk space, then retry.")
+            .with_verbose_detail(source.to_string()),
+            Self::PromoteLockedArtifact { from, to, source } => ErrorReport::new(
+                ErrorKind::System,
+                "Pyra could not activate a verified package artifact.",
+            )
+            .with_detail("Pyra verified the artifact hash but could not move the staged file into its stable local cache path.")
+            .with_suggestion("Retry the sync. If the problem persists, clear the artifact cache and try again.")
+            .with_verbose_detail(format!("from: {from}\nto: {to}\n{source}")),
+            Self::RemoveArtifactFile { path, source } => ErrorReport::new(
+                ErrorKind::System,
+                format!("Pyra could not clean up `{path}`."),
+            )
+            .with_detail("Pyra tried to remove a verified-artifact cache or staging file after a failure.")
+            .with_suggestion("Remove the artifact file manually and retry.")
+            .with_verbose_detail(source.to_string()),
+            Self::LockedArtifactHashMismatch {
+                package,
+                artifact,
+                expected,
+                actual,
+            } => ErrorReport::new(
+                ErrorKind::System,
+                format!("Pyra rejected the locked artifact for `{package}`."),
+            )
+            .with_detail("The downloaded artifact hash did not match `pylock.toml`, so sync stopped before install.")
+            .with_suggestion("Retry the sync. If it still fails, regenerate `pylock.toml` from a trusted index.")
+            .with_verbose_detail(format!(
+                "artifact: {artifact}\nexpected sha256: {expected}\nactual sha256: {actual}"
+            )),
             Self::InstallLockedPackage {
                 package,
                 interpreter,

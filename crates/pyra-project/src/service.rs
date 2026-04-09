@@ -205,14 +205,17 @@ impl ProjectService {
             &input.project_name,
             input.build_system_present,
         );
-        let applied = EnvironmentInstaller.apply(
-            &environment.interpreter_path,
-            &input.project_root,
-            &input.project_name,
-            input.build_system_present,
-            &plan,
-            &selected_packages,
-        )?;
+        let applied = EnvironmentInstaller
+            .apply(
+                &context.paths,
+                &environment.interpreter_path,
+                &input.project_root,
+                &input.project_name,
+                input.build_system_present,
+                &plan,
+                &selected_packages,
+            )
+            .await?;
 
         Ok(SyncProjectOutcome {
             project_root: input.project_root,

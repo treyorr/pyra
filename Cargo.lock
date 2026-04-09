@@ -1081,6 +1081,7 @@ dependencies = [
  "pyra-errors",
  "pyra-python",
  "pyra-resolver",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2",

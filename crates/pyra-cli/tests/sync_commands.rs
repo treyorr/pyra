@@ -1,10 +1,13 @@
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 
 use assert_cmd::Command;
 use predicates::str::contains;
 use pyra_python::{ArchiveFormat, HostTarget, InstalledPythonRecord, PythonVersion};
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 #[test]
@@ -196,6 +199,52 @@ python = "{python_version}"
         .assert()
         .success()
         .stdout(contains("Synced"));
+}
+
+#[cfg(unix)]
+#[test]
+fn sync_installs_from_verified_local_artifact_path() {
+    let home = temp_env_root();
+    let index = start_fixture_index();
+    let project_root = home
+        .path()
+        .join("workspace")
+        .join("sample-sync-verified-artifact");
+    fs::create_dir_all(&project_root).expect("project root");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        r#"[project]
+name = "sample-sync-verified-artifact"
+version = "0.1.0"
+requires-python = "==3.13.*"
+dependencies = ["attrs==25.1.0"]
+
+[tool.pyra]
+python = "3.13.12"
+"#,
+    )
+    .expect("pyproject");
+
+    let log_path = home.path().join("fake-python-log.jsonl");
+    let fake_python = build_fake_managed_python(home.path(), &log_path).expect("fake python");
+    seed_managed_install_with_executable(&home, "3.13.12", &fake_python).expect("managed install");
+    let state_path = home.path().join("unused-installer-state.json");
+
+    base_command(&home, &state_path)
+        .env_remove("PYRA_SYNC_INSTALLER_STATE_PATH")
+        .env("PYRA_FAKE_PYTHON_LOG", &log_path)
+        .env("PYRA_INDEX_URL", &index.base_url)
+        .current_dir(&project_root)
+        .args(["sync"])
+        .assert()
+        .success()
+        .stdout(contains("Synced"));
+
+    let install_target = fake_python_install_target(&log_path).expect("install target");
+    assert!(!install_target.starts_with("file://"));
+    assert!(Path::new(&install_target).is_absolute());
+    assert!(Path::new(&install_target).starts_with(home.path().join("cache")));
+    assert!(Path::new(&install_target).exists());
 }
 
 #[test]
@@ -551,6 +600,89 @@ fn venv_python_path(path: &Path) -> PathBuf {
     }
 }
 
+#[cfg(unix)]
+fn build_fake_managed_python(
+    root: &Path,
+    log_path: &Path,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let runner_path = root.join("fake-python-runner.py");
+    fs::write(
+        &runner_path,
+        r#"import json
+import os
+import pathlib
+import sys
+
+log_path = pathlib.Path(os.environ["PYRA_FAKE_PYTHON_LOG"])
+
+def log(entry):
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(entry) + "\n")
+
+args = sys.argv[1:]
+if args[:1] == ["-c"]:
+    log({"kind": "inspect", "args": args})
+    sys.stdout.write("[]")
+    raise SystemExit(0)
+
+if args[:3] == ["-m", "venv", "--clear"] and len(args) == 4:
+    import shutil
+
+    target = pathlib.Path(args[3])
+    if target.exists():
+        shutil.rmtree(target)
+    target.mkdir(parents=True, exist_ok=True)
+    log({"kind": "venv", "target": str(target)})
+    raise SystemExit(0)
+
+if args[:4] == ["-m", "pip", "install", "--no-deps"] and len(args) == 5:
+    target = args[4]
+    log({"kind": "install", "target": target, "exists": pathlib.Path(target).exists()})
+    raise SystemExit(0)
+
+if args[:4] == ["-m", "pip", "uninstall", "-y"] and len(args) == 5:
+    log({"kind": "uninstall", "target": args[4]})
+    raise SystemExit(0)
+
+raise SystemExit(f"unexpected fake interpreter args: {args}")
+"#,
+    )?;
+
+    let wrapper_path = root.join("fake-python");
+    let system_python = system_python()?;
+    fs::write(
+        &wrapper_path,
+        format!(
+            "#!/bin/sh\nexec \"{}\" \"{}\" \"$@\"\n",
+            system_python.display(),
+            runner_path.display()
+        ),
+    )?;
+    let mut permissions = fs::metadata(&wrapper_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&wrapper_path, permissions)?;
+
+    let _ = fs::remove_file(log_path);
+    Ok(wrapper_path)
+}
+
+#[cfg(unix)]
+fn fake_python_install_target(log_path: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    let contents = fs::read_to_string(log_path)?;
+    for line in contents.lines() {
+        let entry: serde_json::Value = serde_json::from_str(line)?;
+        if entry.get("kind") == Some(&serde_json::Value::String("install".to_string())) {
+            assert_eq!(entry.get("exists"), Some(&serde_json::Value::Bool(true)));
+            return entry
+                .get("target")
+                .and_then(serde_json::Value::as_str)
+                .map(ToString::to_string)
+                .ok_or_else(|| "missing install target".into());
+        }
+    }
+    Err("missing install log entry".into())
+}
+
 fn read_state(path: &Path) -> std::collections::BTreeMap<String, String> {
     serde_json::from_slice(&fs::read(path).expect("state")).expect("state json")
 }
@@ -562,6 +694,20 @@ struct FixtureIndex {
 
 fn start_fixture_index() -> FixtureIndex {
     let root = tempfile::tempdir().expect("fixture root");
+    for file in [
+        "attrs-25.1.0-py3-none-any.whl",
+        "pytest-8.3.0-py3-none-any.whl",
+        "pluggy-1.5.0-py3-none-any.whl",
+        "sphinx-7.0.0-py3-none-any.whl",
+        "httpx-0.27.0-py3-none-any.whl",
+        "anyio-4.4.0-py3-none-any.whl",
+    ] {
+        write_fixture_bytes(
+            root.path(),
+            &format!("files/{file}"),
+            &fixture_artifact_bytes(file),
+        );
+    }
     write_fixture_file(
         root.path(),
         "attrs.json",
@@ -637,6 +783,14 @@ fn write_fixture_file(root: &Path, relative: &str, contents: String) {
     fs::write(path, contents).expect("fixture file");
 }
 
+fn write_fixture_bytes(root: &Path, relative: &str, contents: &[u8]) {
+    let path = root.join(relative);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("fixture parent");
+    }
+    fs::write(path, contents).expect("fixture bytes");
+}
+
 fn fixture_project_json(package: &str, root: &Path) -> String {
     let file = match package {
         "attrs" => "attrs-25.1.0-py3-none-any.whl",
@@ -651,11 +805,15 @@ fn fixture_project_json(package: &str, root: &Path) -> String {
         "files": [{
             "filename": file,
             "url": format!("file://{}", root.join("files").join(file).display()),
-            "hashes": {"sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+            "hashes": {"sha256": format!("{:x}", Sha256::digest(&fixture_artifact_bytes(file)))},
             "core-metadata": true
         }]
     })
     .to_string()
+}
+
+fn fixture_artifact_bytes(filename: &str) -> Vec<u8> {
+    format!("pyra fixture artifact: {filename}\n").into_bytes()
 }
 
 fn fixture_metadata(filename: &str) -> String {

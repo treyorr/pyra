@@ -4,12 +4,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::process::Command;
 
-use camino::Utf8Path;
+use camino::{Utf8Path, Utf8PathBuf};
+use pyra_core::AppPaths;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 use crate::{
     ProjectError,
-    sync::{LockPackage, LockSelection},
+    sync::{LockArtifact, LockPackage, LockSelection},
 };
 
 const STUB_STATE_ENV: &str = "PYRA_SYNC_INSTALLER_STATE_PATH";
@@ -83,8 +85,9 @@ impl EnvironmentInstaller {
         parse_inspected_distributions(interpreter, &output.stdout)
     }
 
-    pub fn apply(
+    pub async fn apply(
         self,
+        paths: &AppPaths,
         interpreter: &Utf8Path,
         project_root: &Utf8Path,
         project_name: &str,
@@ -114,9 +117,11 @@ impl EnvironmentInstaller {
                         .first()
                         .or(package.sdist.as_ref())
                         .expect("lock package should include an artifact");
+                    let verified_artifact =
+                        prepare_verified_artifact(paths, package, artifact).await?;
                     let output = Command::new(interpreter.as_std_path())
                         .args(["-m", "pip", "install", "--no-deps"])
-                        .arg(&artifact.url)
+                        .arg(verified_artifact.as_std_path())
                         .output()
                         .map_err(|source| ProjectError::CreateEnvironment {
                             path: interpreter.to_string(),
@@ -268,6 +273,135 @@ fn read_stub_state(path: &str) -> Result<BTreeMap<String, String>, ProjectError>
     })
 }
 
+async fn prepare_verified_artifact(
+    paths: &AppPaths,
+    package: &LockPackage,
+    artifact: &LockArtifact,
+) -> Result<Utf8PathBuf, ProjectError> {
+    ensure_artifact_dir(&paths.package_artifact_cache_dir())?;
+    ensure_artifact_dir(&paths.package_artifact_staging_dir())?;
+
+    let artifact_name = normalized_artifact_name(artifact);
+    let cached_path = paths.package_artifact_cache_file(&artifact.sha256, &artifact_name);
+    if cached_path.exists() && file_matches_sha256(&cached_path, &artifact.sha256)? {
+        return Ok(cached_path);
+    }
+    remove_file_if_exists(&cached_path)?;
+
+    let staged_path = paths.package_artifact_staging_file(&artifact.sha256, &artifact_name);
+    remove_file_if_exists(&staged_path)?;
+
+    let bytes = download_artifact_bytes(artifact).await?;
+    let actual_sha256 = sha256_hex(&bytes);
+    if actual_sha256 != artifact.sha256 {
+        return Err(ProjectError::LockedArtifactHashMismatch {
+            package: package.name.clone(),
+            artifact: artifact.name.clone(),
+            expected: artifact.sha256.clone(),
+            actual: actual_sha256,
+        });
+    }
+
+    if let Err(source) = fs::write(staged_path.as_std_path(), &bytes) {
+        cleanup_artifact_file(&staged_path)?;
+        return Err(ProjectError::WriteLockedArtifact {
+            path: staged_path.to_string(),
+            source,
+        });
+    }
+
+    if let Err(source) = fs::rename(staged_path.as_std_path(), cached_path.as_std_path()) {
+        cleanup_artifact_file(&staged_path)?;
+        return Err(ProjectError::PromoteLockedArtifact {
+            from: staged_path.to_string(),
+            to: cached_path.to_string(),
+            source,
+        });
+    }
+
+    Ok(cached_path)
+}
+
+fn ensure_artifact_dir(path: &Utf8Path) -> Result<(), ProjectError> {
+    fs::create_dir_all(path).map_err(|source| ProjectError::PrepareArtifactDirectory {
+        path: path.to_string(),
+        source,
+    })
+}
+
+fn normalized_artifact_name(artifact: &LockArtifact) -> String {
+    Utf8Path::new(&artifact.name)
+        .file_name()
+        .unwrap_or(artifact.name.as_str())
+        .to_string()
+}
+
+async fn download_artifact_bytes(artifact: &LockArtifact) -> Result<Vec<u8>, ProjectError> {
+    if let Some(path) = artifact.url.strip_prefix("file://") {
+        return fs::read(path).map_err(|source| ProjectError::ReadLockedArtifact {
+            path: path.to_string(),
+            source,
+        });
+    }
+
+    let response = reqwest::Client::new()
+        .get(&artifact.url)
+        .header(reqwest::header::USER_AGENT, "pyra/0.1.0")
+        .send()
+        .await
+        .map_err(|source| ProjectError::DownloadLockedArtifact {
+            url: artifact.url.clone(),
+            source,
+        })?
+        .error_for_status()
+        .map_err(|source| ProjectError::DownloadLockedArtifact {
+            url: artifact.url.clone(),
+            source,
+        })?;
+
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|source| ProjectError::DownloadLockedArtifact {
+            url: artifact.url.clone(),
+            source,
+        })?;
+    Ok(bytes.to_vec())
+}
+
+fn file_matches_sha256(path: &Utf8Path, expected: &str) -> Result<bool, ProjectError> {
+    let bytes = fs::read(path).map_err(|source| ProjectError::ReadLockedArtifact {
+        path: path.to_string(),
+        source,
+    })?;
+    Ok(sha256_hex(&bytes) == expected)
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn cleanup_artifact_file(path: &Utf8Path) -> Result<(), ProjectError> {
+    if path.exists() {
+        fs::remove_file(path).map_err(|source| ProjectError::RemoveArtifactFile {
+            path: path.to_string(),
+            source,
+        })?;
+    }
+    Ok(())
+}
+
+fn remove_file_if_exists(path: &Utf8Path) -> Result<(), ProjectError> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(ProjectError::RemoveArtifactFile {
+            path: path.to_string(),
+            source,
+        }),
+    }
+}
+
 fn apply_stub_state(
     path: &str,
     project_name: &str,
@@ -320,12 +454,19 @@ fn apply_stub_state(
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
+    use std::fs;
+    use std::path::Path;
 
-    use camino::Utf8Path;
+    use camino::{Utf8Path, Utf8PathBuf};
+    use pyra_core::AppPaths;
+    use tempfile::tempdir;
 
-    use super::{ReconciliationPlan, ReconciliationPlanAction, parse_inspected_distributions};
+    use super::{
+        ReconciliationPlan, ReconciliationPlanAction, parse_inspected_distributions,
+        prepare_verified_artifact, sha256_hex,
+    };
     use crate::ProjectError;
-    use crate::sync::{LockMarker, LockMarkerClause, LockPackage, LockSelection};
+    use crate::sync::{LockArtifact, LockMarker, LockMarkerClause, LockPackage, LockSelection};
 
     #[test]
     fn builds_exact_reconciliation_plan() {
@@ -448,6 +589,83 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn stages_verified_artifact_with_matching_hash() {
+        let temp = tempdir().expect("temporary directory");
+        let source_path = temp.path().join("attrs-25.1.0-py3-none-any.whl");
+        let bytes = b"attrs wheel fixture bytes";
+        fs::write(&source_path, bytes).expect("artifact bytes");
+        let paths = test_paths(temp.path());
+        let artifact = artifact(
+            source_path.as_path(),
+            sha256_hex(bytes),
+            "attrs-25.1.0-py3-none-any.whl",
+        );
+        let package = package_with_artifact("attrs", artifact.clone());
+
+        let prepared = prepare_verified_artifact(&paths, &package, &artifact)
+            .await
+            .expect("verified artifact");
+
+        assert_eq!(
+            prepared,
+            paths.package_artifact_cache_file(&artifact.sha256, &artifact.name)
+        );
+        assert_eq!(
+            fs::read(prepared.as_std_path()).expect("cached artifact"),
+            bytes
+        );
+        assert!(staging_dir_entries(&paths).is_empty());
+    }
+
+    #[tokio::test]
+    async fn rejects_artifact_with_mismatched_hash_before_install() {
+        let temp = tempdir().expect("temporary directory");
+        let source_path = temp.path().join("attrs-25.1.0-py3-none-any.whl");
+        fs::write(&source_path, b"attrs wheel fixture bytes").expect("artifact bytes");
+        let paths = test_paths(temp.path());
+        let artifact = artifact(
+            source_path.as_path(),
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+            "attrs-25.1.0-py3-none-any.whl",
+        );
+        let package = package_with_artifact("attrs", artifact.clone());
+
+        let error = prepare_verified_artifact(&paths, &package, &artifact)
+            .await
+            .expect_err("hash mismatch should fail");
+
+        assert!(matches!(
+            error,
+            ProjectError::LockedArtifactHashMismatch { ref package, .. } if package == "attrs"
+        ));
+        assert!(staging_dir_entries(&paths).is_empty());
+    }
+
+    #[tokio::test]
+    async fn fails_when_artifact_download_source_is_missing() {
+        let temp = tempdir().expect("temporary directory");
+        let missing_path = temp.path().join("missing.whl");
+        let paths = test_paths(temp.path());
+        let artifact = artifact(
+            missing_path.as_path(),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            "missing.whl",
+        );
+        let package = package_with_artifact("attrs", artifact.clone());
+
+        let error = prepare_verified_artifact(&paths, &package, &artifact)
+            .await
+            .expect_err("missing artifact should fail");
+
+        assert!(matches!(
+            error,
+            ProjectError::ReadLockedArtifact { ref path, .. }
+                if path == missing_path.to_string_lossy().as_ref()
+        ));
+        assert!(staging_dir_entries(&paths).is_empty());
+    }
+
     fn package(name: &str, version: &str, marker: Option<LockMarker>) -> LockPackage {
         LockPackage {
             name: name.to_string(),
@@ -459,5 +677,46 @@ mod tests {
             sdist: None,
             wheels: Vec::new(),
         }
+    }
+
+    fn package_with_artifact(name: &str, artifact: LockArtifact) -> LockPackage {
+        let mut package = package(name, "25.1.0", None);
+        package.wheels = vec![artifact];
+        package
+    }
+
+    fn artifact(path: &Path, sha256: String, name: &str) -> LockArtifact {
+        LockArtifact {
+            name: name.to_string(),
+            url: format!("file://{}", path.display()),
+            size: None,
+            upload_time: None,
+            sha256,
+        }
+    }
+
+    fn test_paths(root: &Path) -> AppPaths {
+        let root = Utf8PathBuf::from_path_buf(root.to_path_buf()).expect("utf-8 temp dir");
+        let paths = AppPaths::from_roots(
+            root.join("config"),
+            root.join("data"),
+            root.join("cache"),
+            root.join("state"),
+        );
+        paths.ensure_base_layout().expect("base layout");
+        paths
+    }
+
+    fn staging_dir_entries(paths: &AppPaths) -> Vec<String> {
+        fs::read_dir(paths.package_artifact_staging_dir().as_std_path())
+            .expect("staging dir")
+            .map(|entry| {
+                entry
+                    .expect("staging entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect()
     }
 }

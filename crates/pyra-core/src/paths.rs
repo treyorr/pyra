@@ -87,6 +87,10 @@ impl AppPaths {
             // layout, so the base directory exists even before real installs do.
             &self.python_installations_dir(),
             &self.python_downloads_dir(),
+            // Locked package artifacts are staged and verified under Pyra-owned
+            // cache paths so sync never hands lock URLs directly to pip.
+            &self.package_artifact_cache_dir(),
+            &self.package_artifact_staging_dir(),
             &self.project_environments_dir(),
         ] {
             ensure_dir(path)?;
@@ -113,6 +117,24 @@ impl AppPaths {
 
     pub fn python_download_archive(&self, asset_name: &str) -> Utf8PathBuf {
         self.python_downloads_dir().join(asset_name)
+    }
+
+    pub fn package_artifact_cache_dir(&self) -> Utf8PathBuf {
+        self.cache_dir.join("artifacts").join("verified")
+    }
+
+    pub fn package_artifact_staging_dir(&self) -> Utf8PathBuf {
+        self.cache_dir.join("artifacts").join("staging")
+    }
+
+    pub fn package_artifact_cache_file(&self, sha256: &str, artifact_name: &str) -> Utf8PathBuf {
+        self.package_artifact_cache_dir()
+            .join(format!("{sha256}-{artifact_name}"))
+    }
+
+    pub fn package_artifact_staging_file(&self, sha256: &str, artifact_name: &str) -> Utf8PathBuf {
+        self.package_artifact_staging_dir()
+            .join(format!("{sha256}-{artifact_name}.part"))
     }
 
     pub fn project_environments_dir(&self) -> Utf8PathBuf {
@@ -203,6 +225,26 @@ mod tests {
         assert_eq!(
             paths.project_environment_metadata("abc123"),
             Utf8PathBuf::from("/tmp/data/environments/abc123/metadata.json")
+        );
+        assert_eq!(
+            paths.package_artifact_cache_dir(),
+            Utf8PathBuf::from("/tmp/cache/artifacts/verified")
+        );
+        assert_eq!(
+            paths.package_artifact_staging_dir(),
+            Utf8PathBuf::from("/tmp/cache/artifacts/staging")
+        );
+        assert_eq!(
+            paths.package_artifact_cache_file("deadbeef", "attrs-25.1.0-py3-none-any.whl"),
+            Utf8PathBuf::from(
+                "/tmp/cache/artifacts/verified/deadbeef-attrs-25.1.0-py3-none-any.whl"
+            )
+        );
+        assert_eq!(
+            paths.package_artifact_staging_file("deadbeef", "attrs-25.1.0-py3-none-any.whl"),
+            Utf8PathBuf::from(
+                "/tmp/cache/artifacts/staging/deadbeef-attrs-25.1.0-py3-none-any.whl.part"
+            )
         );
     }
 }

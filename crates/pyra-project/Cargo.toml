@@ -13,6 +13,7 @@ pyra-core = { path = "../pyra-core" }
 pyra-errors = { path = "../pyra-errors" }
 pyra-python = { path = "../pyra-python" }
 pyra-resolver = { path = "../pyra-resolver" }
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
