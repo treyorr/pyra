@@ -399,3 +399,198 @@ fn token_kind_name(kind: &ResolutionRootTokenKind) -> &'static str {
         ResolutionRootTokenKind::Extra => "extra",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::test_support::{ArtifactFixture, PackageFixture, ResolverFixtureHarness};
+    use crate::{ArtifactKind, ResolverError};
+
+    #[tokio::test]
+    async fn resolves_direct_dependency_from_local_fixture() {
+        let harness = ResolverFixtureHarness::new().expect("fixture harness");
+        harness
+            .add_package(
+                PackageFixture::new("alpha").with_artifact(ArtifactFixture::wheel("1.0.0")),
+            )
+            .expect("alpha fixture");
+
+        let resolved = harness.resolve(&["alpha"]).await.expect("resolution");
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].name, "alpha");
+        assert_eq!(resolved[0].version, "1.0.0");
+        assert!(resolved[0].dependencies.is_empty());
+        assert_eq!(resolved[0].root_tokens.len(), 1);
+        assert_eq!(resolved[0].artifacts[0].kind, ArtifactKind::Wheel);
+    }
+
+    #[tokio::test]
+    async fn resolves_transitive_dependency_from_local_fixture() {
+        let harness = ResolverFixtureHarness::new().expect("fixture harness");
+        harness
+            .add_package(
+                PackageFixture::new("alpha")
+                    .with_artifact(ArtifactFixture::wheel("1.0.0").with_dependency("beta>=2,<3")),
+            )
+            .expect("alpha fixture");
+        harness
+            .add_package(PackageFixture::new("beta").with_artifact(ArtifactFixture::wheel("2.1.0")))
+            .expect("beta fixture");
+
+        let resolved = harness.resolve(&["alpha"]).await.expect("resolution");
+        let alpha = package(&resolved, "alpha");
+        let beta = package(&resolved, "beta");
+
+        assert_eq!(alpha.dependencies.len(), 1);
+        assert_eq!(alpha.dependencies[0].name, "beta");
+        assert_eq!(alpha.dependencies[0].version, beta.version);
+    }
+
+    #[tokio::test]
+    async fn reports_conflicts_from_local_fixture_graph() {
+        let harness = ResolverFixtureHarness::new().expect("fixture harness");
+        harness
+            .add_package(
+                PackageFixture::new("alpha")
+                    .with_artifact(ArtifactFixture::wheel("1.0.0").with_dependency("shared<2")),
+            )
+            .expect("alpha fixture");
+        harness
+            .add_package(
+                PackageFixture::new("bravo")
+                    .with_artifact(ArtifactFixture::wheel("1.0.0").with_dependency("shared>=2")),
+            )
+            .expect("bravo fixture");
+        harness
+            .add_package(
+                PackageFixture::new("shared").with_artifact(ArtifactFixture::wheel("1.5.0")),
+            )
+            .expect("shared v1 fixture");
+        harness
+            .add_package(
+                PackageFixture::new("shared").with_artifact(ArtifactFixture::wheel("2.0.0")),
+            )
+            .expect("shared v2 fixture");
+
+        let error = harness
+            .resolve(&["alpha", "bravo"])
+            .await
+            .expect_err("conflict");
+
+        assert!(matches!(error, ResolverError::Solve { .. }));
+    }
+
+    #[tokio::test]
+    async fn reports_missing_core_metadata_from_local_fixture() {
+        let harness = ResolverFixtureHarness::new().expect("fixture harness");
+        harness
+            .add_package(
+                PackageFixture::new("alpha")
+                    .with_artifact(ArtifactFixture::wheel("1.0.0").without_core_metadata()),
+            )
+            .expect("alpha fixture");
+
+        let error = harness
+            .resolve(&["alpha"])
+            .await
+            .expect_err("missing metadata");
+
+        assert!(matches!(
+            error,
+            ResolverError::MissingCoreMetadata { package } if package == "alpha"
+        ));
+    }
+
+    #[tokio::test]
+    async fn reports_missing_installable_artifacts_from_local_fixture() {
+        let harness = ResolverFixtureHarness::new().expect("fixture harness");
+        harness
+            .add_package(
+                PackageFixture::new("alpha")
+                    .with_artifact(ArtifactFixture::wheel_with_tags(
+                        "1.0.0",
+                        "cp313",
+                        "cp313",
+                        "macosx_11_0_arm64",
+                    ))
+                    .with_artifact(ArtifactFixture::sdist("1.0.0").yanked()),
+            )
+            .expect("alpha fixture");
+
+        let error = harness
+            .resolve(&["alpha"])
+            .await
+            .expect_err("no installable artifacts");
+
+        assert!(matches!(
+            error,
+            ResolverError::NoInstallableArtifacts { package } if package == "alpha"
+        ));
+    }
+
+    #[tokio::test]
+    async fn prefers_wheels_and_falls_back_to_sdists_with_local_fixtures() {
+        let harness = ResolverFixtureHarness::new().expect("fixture harness");
+        harness
+            .add_package(
+                PackageFixture::new("preferred")
+                    .with_artifact(ArtifactFixture::wheel("1.0.0"))
+                    .with_artifact(ArtifactFixture::sdist("1.0.0")),
+            )
+            .expect("preferred fixture");
+        harness
+            .add_package(
+                PackageFixture::new("fallback")
+                    .with_artifact(ArtifactFixture::wheel_with_tags(
+                        "1.0.0",
+                        "cp313",
+                        "cp313",
+                        "macosx_11_0_arm64",
+                    ))
+                    .with_artifact(ArtifactFixture::sdist("1.0.0").with_requires_python(">=3.13")),
+            )
+            .expect("fallback fixture");
+
+        let resolved = harness
+            .resolve(&["preferred", "fallback"])
+            .await
+            .expect("resolution");
+        let preferred = package(&resolved, "preferred");
+        let fallback = package(&resolved, "fallback");
+
+        assert!(
+            preferred
+                .artifacts
+                .iter()
+                .all(|artifact| artifact.kind == ArtifactKind::Wheel)
+        );
+        assert!(
+            preferred
+                .artifacts
+                .iter()
+                .all(|artifact| artifact.name.ends_with(".whl"))
+        );
+        assert!(
+            fallback
+                .artifacts
+                .iter()
+                .all(|artifact| artifact.kind == ArtifactKind::Sdist)
+        );
+        assert!(
+            fallback
+                .artifacts
+                .iter()
+                .all(|artifact| artifact.name.ends_with(".tar.gz"))
+        );
+    }
+
+    fn package<'a>(
+        packages: &'a [crate::ResolvedPackage],
+        name: &str,
+    ) -> &'a crate::ResolvedPackage {
+        packages
+            .iter()
+            .find(|package| package.name == name)
+            .expect("resolved package")
+    }
+}

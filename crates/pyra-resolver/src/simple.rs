@@ -85,6 +85,7 @@ pub async fn fetch_candidates(
     }
 
     let mut candidates = Vec::new();
+    let mut missing_core_metadata = false;
     for (version, files) in grouped {
         let chosen = choose_best_artifacts(files);
         let Some(metadata_url) = chosen
@@ -92,6 +93,9 @@ pub async fn fetch_candidates(
             .find(|file| file.core_metadata.is_some())
             .map(|file| format!("{}.metadata", file.url))
         else {
+            // Keep missing metadata distinct from "no installable artifacts" so
+            // resolver tests can verify incomplete index data explicitly.
+            missing_core_metadata = true;
             continue;
         };
 
@@ -133,6 +137,11 @@ pub async fn fetch_candidates(
     }
 
     if candidates.is_empty() {
+        if missing_core_metadata {
+            return Err(ResolverError::MissingCoreMetadata {
+                package: package.to_string(),
+            });
+        }
         return Err(ResolverError::NoInstallableArtifacts {
             package: package.to_string(),
         });

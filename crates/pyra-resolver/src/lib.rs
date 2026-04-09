@@ -9,6 +9,8 @@ mod metadata;
 mod model;
 mod provider;
 mod simple;
+#[cfg(test)]
+mod test_support;
 mod version;
 
 pub use error::ResolverError;
