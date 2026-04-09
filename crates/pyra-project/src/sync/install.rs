@@ -5,6 +5,7 @@ use std::fs;
 use std::process::Command;
 
 use camino::Utf8Path;
+use serde::Deserialize;
 
 use crate::{
     ProjectError,
@@ -12,6 +13,29 @@ use crate::{
 };
 
 const STUB_STATE_ENV: &str = "PYRA_SYNC_INSTALLER_STATE_PATH";
+// Environment inspection is a read-only installer concern. Querying the
+// managed interpreter's stdlib metadata keeps that step independent from pip's
+// CLI health while still reflecting the interpreter's installed distributions.
+const IMPORTLIB_METADATA_INSPECTION_SCRIPT: &str = r#"
+import importlib.metadata
+import json
+import sys
+
+packages = [
+    {
+        "name": distribution.metadata["Name"],
+        "version": distribution.version,
+    }
+    for distribution in importlib.metadata.distributions()
+]
+json.dump(packages, sys.stdout)
+"#;
+
+#[derive(Debug, Deserialize)]
+struct InspectedDistribution {
+    name: String,
+    version: String,
+}
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum ReconciliationPlanAction {
@@ -43,40 +67,20 @@ impl EnvironmentInstaller {
         }
 
         let output = Command::new(interpreter.as_std_path())
-            .args(["-m", "pip", "list", "--format=json"])
+            .args(["-c", IMPORTLIB_METADATA_INSPECTION_SCRIPT])
             .output()
-            .map_err(|source| ProjectError::CreateEnvironment {
-                path: interpreter.to_string(),
-                source,
+            .map_err(|source| ProjectError::InspectEnvironment {
+                interpreter: interpreter.to_string(),
+                detail: source.to_string(),
             })?;
         if !output.status.success() {
             return Err(ProjectError::InspectEnvironment {
                 interpreter: interpreter.to_string(),
-                stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+                detail: String::from_utf8_lossy(&output.stderr).trim().to_string(),
             });
         }
 
-        let packages =
-            serde_json::from_slice::<Vec<serde_json::Value>>(&output.stdout).map_err(|error| {
-                ProjectError::ParseLockfile {
-                    path: "pip list".to_string(),
-                    detail: error.to_string(),
-                }
-            })?;
-        let mut installed = BTreeMap::new();
-        for package in packages {
-            let Some(name) = package.get("name").and_then(serde_json::Value::as_str) else {
-                continue;
-            };
-            let Some(version) = package.get("version").and_then(serde_json::Value::as_str) else {
-                continue;
-            };
-            installed.insert(
-                name.to_ascii_lowercase().replace('_', "-"),
-                version.to_string(),
-            );
-        }
-        Ok(installed)
+        parse_inspected_distributions(interpreter, &output.stdout)
     }
 
     pub fn apply(
@@ -228,6 +232,28 @@ fn marker_matches(marker: Option<&crate::sync::LockMarker>, selection: &LockSele
     marker.matches(selection)
 }
 
+fn parse_inspected_distributions(
+    interpreter: &Utf8Path,
+    stdout: &[u8],
+) -> Result<BTreeMap<String, String>, ProjectError> {
+    let packages =
+        serde_json::from_slice::<Vec<InspectedDistribution>>(stdout).map_err(|error| {
+            ProjectError::InspectEnvironment {
+                interpreter: interpreter.to_string(),
+                detail: format!("invalid importlib.metadata output: {error}"),
+            }
+        })?;
+    Ok(packages
+        .into_iter()
+        .map(|package| {
+            (
+                package.name.to_ascii_lowercase().replace('_', "-"),
+                package.version,
+            )
+        })
+        .collect())
+}
+
 fn read_stub_state(path: &str) -> Result<BTreeMap<String, String>, ProjectError> {
     if !Utf8Path::new(path).exists() {
         return Ok(BTreeMap::new());
@@ -295,7 +321,10 @@ fn apply_stub_state(
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
-    use super::{ReconciliationPlan, ReconciliationPlanAction};
+    use camino::Utf8Path;
+
+    use super::{ReconciliationPlan, ReconciliationPlanAction, parse_inspected_distributions};
+    use crate::ProjectError;
     use crate::sync::{LockMarker, LockMarkerClause, LockPackage, LockSelection};
 
     #[test]
@@ -380,6 +409,43 @@ mod tests {
             .map(|package| package.name.as_str())
             .collect::<Vec<_>>();
         assert_eq!(selected_names, vec!["attrs", "pytest", "rich-extra"]);
+    }
+
+    #[test]
+    fn normalizes_inspected_package_names_and_versions() {
+        let installed = parse_inspected_distributions(
+            Utf8Path::new("/tmp/python"),
+            br#"
+[
+  {"name": "Friendly_Bard", "version": "1.2.3"},
+  {"name": "zope.interface", "version": "7.0"}
+]
+"#,
+        )
+        .expect("inspection output");
+
+        assert_eq!(
+            installed,
+            BTreeMap::from([
+                ("friendly-bard".to_string(), "1.2.3".to_string()),
+                ("zope.interface".to_string(), "7.0".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_inspection_output() {
+        let error = parse_inspected_distributions(Utf8Path::new("/tmp/python"), b"{not json}")
+            .expect_err("malformed inspection output should fail");
+
+        assert!(matches!(
+            error,
+            ProjectError::InspectEnvironment {
+                ref interpreter,
+                ref detail,
+            } if interpreter == "/tmp/python"
+                && detail.contains("invalid importlib.metadata output")
+        ));
     }
 
     fn package(name: &str, version: &str, marker: Option<LockMarker>) -> LockPackage {

@@ -158,7 +158,7 @@ pub enum ProjectError {
         source: ResolverError,
     },
     #[error("failed to query installed packages from {interpreter}")]
-    InspectEnvironment { interpreter: String, stderr: String },
+    InspectEnvironment { interpreter: String, detail: String },
     #[error("failed to install package `{package}` into the environment")]
     InstallLockedPackage {
         package: String,
@@ -452,14 +452,14 @@ impl UserFacingError for ProjectError {
             .with_verbose_detail(source.to_string()),
             Self::InspectEnvironment {
                 interpreter,
-                stderr,
+                detail,
             } => ErrorReport::new(
                 ErrorKind::System,
                 "Pyra could not inspect the centralized environment state.",
             )
             .with_detail("Pyra asks the environment's Python to report currently installed distributions before applying an exact sync.")
             .with_suggestion("Retry the sync. If the problem persists, recreate the environment with `pyra use <version>` and retry.")
-            .with_verbose_detail(format!("interpreter: {interpreter}\nstderr: {stderr}")),
+            .with_verbose_detail(format!("interpreter: {interpreter}\ndetail: {detail}")),
             Self::InstallLockedPackage {
                 package,
                 interpreter,

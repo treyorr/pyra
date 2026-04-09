@@ -147,6 +147,58 @@ python = "3.13.12"
 }
 
 #[test]
+fn sync_inspects_environment_without_pip_list() {
+    let home = temp_env_root();
+    let project_root = home
+        .path()
+        .join("workspace")
+        .join("sample-sync-importlib-inspection");
+    fs::create_dir_all(&project_root).expect("project root");
+    let python_version = system_python_version().expect("system python version");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        format!(
+            r#"[project]
+name = "sample-sync-importlib-inspection"
+version = "0.1.0"
+dependencies = []
+
+[tool.pyra]
+python = "{python_version}"
+"#,
+        ),
+    )
+    .expect("pyproject");
+
+    let managed_env = home.path().join("managed-python");
+    create_virtualenv(&system_python().expect("system python"), &managed_env)
+        .expect("managed virtualenv");
+    let managed_python = venv_python_path(&managed_env);
+    seed_managed_install_with_executable(&home, &python_version, &managed_python)
+        .expect("managed install");
+
+    let poison_root = home.path().join("poisoned-pythonpath");
+    fs::create_dir_all(poison_root.join("pip")).expect("poisoned pip package");
+    fs::write(poison_root.join("pip").join("__init__.py"), "").expect("pip __init__");
+    fs::write(
+        poison_root.join("pip").join("__main__.py"),
+        "raise SystemExit('pip list should not be used during environment inspection')\n",
+    )
+    .expect("pip __main__");
+
+    let state_path = home.path().join("unused-installer-state.json");
+    let mut command = base_command(&home, &state_path);
+    command
+        .env_remove("PYRA_SYNC_INSTALLER_STATE_PATH")
+        .env("PYTHONPATH", &poison_root)
+        .current_dir(&project_root)
+        .args(["sync"])
+        .assert()
+        .success()
+        .stdout(contains("Synced"));
+}
+
+#[test]
 fn sync_reuses_fresh_lock_when_freshness_inputs_are_unchanged() {
     let home = temp_env_root();
     let index = start_fixture_index();
@@ -410,6 +462,14 @@ fn temp_env_root() -> TempDir {
 }
 
 fn seed_managed_install(home: &TempDir, version: &str) -> Result<(), Box<dyn std::error::Error>> {
+    seed_managed_install_with_executable(home, version, &system_python()?)
+}
+
+fn seed_managed_install_with_executable(
+    home: &TempDir,
+    version: &str,
+    executable_path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
     let install_dir = home.path().join("data").join("pythons").join(version);
     fs::create_dir_all(&install_dir)?;
 
@@ -424,7 +484,7 @@ fn seed_managed_install(home: &TempDir, version: &str) -> Result<(), Box<dyn std
         checksum_sha256: None,
         install_dir: camino::Utf8PathBuf::from_path_buf(install_dir.clone())
             .expect("utf-8 install dir"),
-        executable_path: camino::Utf8PathBuf::from_path_buf(system_python()?)
+        executable_path: camino::Utf8PathBuf::from_path_buf(executable_path.to_path_buf())
             .expect("utf-8 python path"),
     };
 
@@ -453,6 +513,42 @@ fn system_python() -> Result<PathBuf, Box<dyn std::error::Error>> {
     }
 
     Err("no usable system python was found for integration tests".into())
+}
+
+fn system_python_version() -> Result<String, Box<dyn std::error::Error>> {
+    let output = ProcessCommand::new(system_python()?)
+        .args([
+            "-c",
+            "import sys; print('.'.join(map(str, sys.version_info[:3])))",
+        ])
+        .output()?;
+    if !output.status.success() {
+        return Err("failed to determine system python version".into());
+    }
+    Ok(String::from_utf8(output.stdout)?.trim().to_string())
+}
+
+fn create_virtualenv(interpreter: &Path, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let output = ProcessCommand::new(interpreter)
+        .args(["-m", "venv"])
+        .arg(path)
+        .output()?;
+    if !output.status.success() {
+        return Err(format!(
+            "failed to create virtualenv: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn venv_python_path(path: &Path) -> PathBuf {
+    if cfg!(windows) {
+        path.join("Scripts").join("python.exe")
+    } else {
+        path.join("bin").join("python")
+    }
 }
 
 fn read_state(path: &Path) -> std::collections::BTreeMap<String, String> {
