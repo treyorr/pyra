@@ -194,3 +194,209 @@ fn platform_tag_compatible(tag: &str, env: &ResolverEnvironment) -> bool {
         _ => false,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::BTreeMap, str::FromStr};
+
+    use pep440_rs::{Version, VersionSpecifiers};
+    use pep508_rs::MarkerEnvironmentBuilder;
+
+    use super::{artifact_compatible, requirement_to_range};
+    use crate::{ResolverEnvironment, simple::SimpleFile};
+
+    #[test]
+    fn equal_operator_matches_only_the_exact_version() {
+        assert_range("==1.2.3", &["1.2.3"], &["1.2.2", "1.2.4"]);
+    }
+
+    #[test]
+    fn not_equal_operator_excludes_only_the_exact_version() {
+        assert_range("!=1.2.3", &["1.2.2", "1.2.4"], &["1.2.3"]);
+    }
+
+    #[test]
+    fn less_than_operator_excludes_the_boundary() {
+        assert_range("<1.2.3", &["1.2.2"], &["1.2.3", "1.2.4"]);
+    }
+
+    #[test]
+    fn less_than_equal_operator_includes_the_boundary() {
+        assert_range("<=1.2.3", &["1.2.2", "1.2.3"], &["1.2.4"]);
+    }
+
+    #[test]
+    fn greater_than_operator_excludes_the_boundary() {
+        assert_range(">1.2.3", &["1.2.4"], &["1.2.2", "1.2.3"]);
+    }
+
+    #[test]
+    fn greater_than_equal_operator_includes_the_boundary() {
+        assert_range(">=1.2.3", &["1.2.3", "1.2.4"], &["1.2.2"]);
+    }
+
+    #[test]
+    fn wildcard_equal_operator_stops_before_the_next_release_prefix() {
+        assert_range("==1.2.*", &["1.2.0", "1.2.9"], &["1.1.9", "1.3.0"]);
+    }
+
+    #[test]
+    fn wildcard_not_equal_operator_excludes_the_matching_prefix() {
+        assert_range("!=1.2.*", &["1.1.9", "1.3.0"], &["1.2.0", "1.2.9"]);
+    }
+
+    #[test]
+    fn compatible_release_with_two_release_segments_caps_at_the_next_major() {
+        assert_range("~=1.2", &["1.2", "1.9.9"], &["1.1.9", "2.0.0"]);
+    }
+
+    #[test]
+    fn compatible_release_with_three_release_segments_caps_at_the_next_minor() {
+        assert_range("~=1.2.3", &["1.2.3", "1.2.9"], &["1.2.2", "1.3.0"]);
+    }
+
+    #[test]
+    fn py3_none_any_wheels_are_accepted_for_every_supported_target() {
+        for triple in supported_target_triples() {
+            assert!(
+                artifact_compatible(
+                    &simple_file("demo-1.0.0-py3-none-any.whl"),
+                    &resolver_environment(triple),
+                ),
+                "expected py3-none-any to match {triple}"
+            );
+        }
+    }
+
+    #[test]
+    fn abi3_wheels_follow_the_current_supported_host_matrix() {
+        let cases = [
+            (
+                "aarch64-apple-darwin",
+                "demo-1.0.0-cp313-abi3-macosx_11_0_arm64.whl",
+                "demo-1.0.0-cp313-abi3-macosx_11_0_x86_64.whl",
+            ),
+            (
+                "x86_64-apple-darwin",
+                "demo-1.0.0-cp313-abi3-macosx_11_0_x86_64.whl",
+                "demo-1.0.0-cp313-abi3-macosx_11_0_arm64.whl",
+            ),
+            (
+                "x86_64-unknown-linux-gnu",
+                "demo-1.0.0-cp313-abi3-manylinux_2_17_x86_64.whl",
+                "demo-1.0.0-cp313-abi3-manylinux_2_17_aarch64.whl",
+            ),
+            (
+                "aarch64-unknown-linux-gnu",
+                "demo-1.0.0-cp313-abi3-manylinux_2_17_aarch64.whl",
+                "demo-1.0.0-cp313-abi3-manylinux_2_17_x86_64.whl",
+            ),
+        ];
+
+        for (triple, matching, mismatching) in cases {
+            let env = resolver_environment(triple);
+            assert!(
+                artifact_compatible(&simple_file(matching), &env),
+                "expected {matching} to match {triple}"
+            );
+            assert!(
+                !artifact_compatible(&simple_file(mismatching), &env),
+                "expected {mismatching} to be rejected for {triple}"
+            );
+        }
+    }
+
+    #[test]
+    fn exact_python_tags_reject_other_python_versions() {
+        let env = resolver_environment("x86_64-unknown-linux-gnu");
+        assert!(!artifact_compatible(
+            &simple_file("demo-1.0.0-cp312-cp312-manylinux_2_17_x86_64.whl"),
+            &env,
+        ));
+    }
+
+    #[test]
+    fn source_distributions_remain_installable_candidates() {
+        let env = resolver_environment("x86_64-unknown-linux-gnu");
+        assert!(artifact_compatible(&simple_file("demo-1.0.0.tar.gz"), &env));
+        assert!(artifact_compatible(&simple_file("demo-1.0.0.zip"), &env));
+    }
+
+    fn assert_range(specifier: &str, included: &[&str], excluded: &[&str]) {
+        let specifiers = VersionSpecifiers::from_str(specifier).expect("valid version specifier");
+        let range = requirement_to_range("demo", &specifiers).expect("supported range");
+
+        for version in included {
+            assert!(
+                range.contains(&parse_version(version)),
+                "expected {specifier} to contain {version}"
+            );
+        }
+
+        for version in excluded {
+            assert!(
+                !range.contains(&parse_version(version)),
+                "expected {specifier} to exclude {version}"
+            );
+        }
+    }
+
+    fn parse_version(version: &str) -> Version {
+        Version::from_str(version).expect("valid version")
+    }
+
+    fn supported_target_triples() -> [&'static str; 4] {
+        [
+            "aarch64-apple-darwin",
+            "x86_64-apple-darwin",
+            "x86_64-unknown-linux-gnu",
+            "aarch64-unknown-linux-gnu",
+        ]
+    }
+
+    fn resolver_environment(target_triple: &str) -> ResolverEnvironment {
+        // These tests intentionally lock the current supported host matrix from
+        // `docs/resolution-scope.md`. If Pyra expands wheel support later, the
+        // docs and this matrix should change together.
+        let (platform_machine, platform_system, sys_platform) = match target_triple {
+            "aarch64-apple-darwin" => ("arm64", "Darwin", "darwin"),
+            "x86_64-apple-darwin" => ("x86_64", "Darwin", "darwin"),
+            "x86_64-unknown-linux-gnu" => ("x86_64", "Linux", "linux"),
+            "aarch64-unknown-linux-gnu" => ("aarch64", "Linux", "linux"),
+            other => panic!("unsupported test target triple: {other}"),
+        };
+
+        let python_full_version = "3.13.2";
+        let markers = MarkerEnvironmentBuilder {
+            implementation_name: "cpython",
+            implementation_version: python_full_version,
+            os_name: "posix",
+            platform_machine,
+            platform_python_implementation: "CPython",
+            platform_release: "",
+            platform_system,
+            platform_version: "",
+            python_full_version,
+            python_version: "3.13",
+            sys_platform,
+        }
+        .try_into()
+        .expect("marker environment");
+
+        ResolverEnvironment::new(markers, python_full_version, target_triple)
+            .expect("resolver environment")
+    }
+
+    fn simple_file(filename: &str) -> SimpleFile {
+        SimpleFile {
+            filename: filename.to_string(),
+            url: "file:///fixture".to_string(),
+            hashes: BTreeMap::new(),
+            requires_python: None,
+            size: None,
+            upload_time: None,
+            core_metadata: None,
+            yanked: None,
+        }
+    }
+}
