@@ -48,6 +48,14 @@ pub async fn resolve_request(
     collapse_solution(&request, &catalog, solution)
 }
 
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+struct CatalogRequest {
+    // Catalog traversal has to remember requested dependency extras so we can
+    // discover extra-activated edges without eagerly chasing every marker branch.
+    package: String,
+    extras: Vec<String>,
+}
+
 async fn build_catalog(
     client: &reqwest::Client,
     request: &ResolutionRequest,
@@ -62,23 +70,36 @@ async fn build_catalog(
                     value: requirement.clone(),
                 }
             })?;
-            queue.push_back(requirement.name.to_string());
+            queue.push_back(catalog_request(&requirement));
         }
     }
 
     let mut catalog = HashMap::new();
-    while let Some(package) = queue.pop_front() {
-        if !seen.insert(package.clone()) {
+    while let Some(next) = queue.pop_front() {
+        if !seen.insert(next.clone()) {
             continue;
         }
-        let candidates =
-            fetch_candidates(client, &request.index_url, &package, &request.environment).await?;
-        for candidate in &candidates {
-            for dependency in &candidate.dependencies {
-                queue.push_back(dependency.name.to_string());
+
+        if !catalog.contains_key(&next.package) {
+            let candidates = fetch_candidates(
+                client,
+                &request.index_url,
+                &next.package,
+                &request.environment,
+            )
+            .await?;
+            catalog.insert(next.package.clone(), candidates);
+        }
+
+        let candidates = catalog
+            .get(&next.package)
+            .expect("catalog entry inserted before traversal");
+        for candidate in candidates {
+            for dependency in active_catalog_requests(candidate, &request.environment, &next.extras)
+            {
+                queue.push_back(dependency);
             }
         }
-        catalog.insert(package, candidates);
     }
     Ok(catalog)
 }
@@ -154,10 +175,7 @@ fn dependency_constraints(
     env: &ResolverEnvironment,
     extras: &[String],
 ) -> Result<BTreeMap<PackageKey, Ranges<Version>>, ResolverError> {
-    let active_extras = extras
-        .iter()
-        .map(|extra| ExtraName::from_str(extra).expect("normalized extra"))
-        .collect::<Vec<_>>();
+    let active_extras = active_extra_names(extras);
 
     let mut dependencies = BTreeMap::new();
     for requirement in &candidate.dependencies {
@@ -169,6 +187,20 @@ fn dependency_constraints(
         merge_dependency(&mut dependencies, dependency_key, range);
     }
     Ok(dependencies)
+}
+
+fn active_catalog_requests(
+    candidate: &SimpleCandidate,
+    env: &ResolverEnvironment,
+    extras: &[String],
+) -> Vec<CatalogRequest> {
+    let active_extras = active_extra_names(extras);
+    candidate
+        .dependencies
+        .iter()
+        .filter(|requirement| requirement.evaluate_markers(&env.markers, &active_extras))
+        .map(catalog_request)
+        .collect()
 }
 
 fn variant_constraints(
@@ -194,6 +226,27 @@ fn merge_dependency(
         .entry(key)
         .and_modify(|existing| *existing = existing.intersection(&range))
         .or_insert(range);
+}
+
+fn active_extra_names(extras: &[String]) -> Vec<ExtraName> {
+    extras
+        .iter()
+        .map(|extra| ExtraName::from_str(extra).expect("normalized extra"))
+        .collect::<Vec<_>>()
+}
+
+fn catalog_request(requirement: &Requirement) -> CatalogRequest {
+    let mut extras = requirement
+        .extras
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    extras.sort();
+    extras.dedup();
+    CatalogRequest {
+        package: requirement.name.to_string(),
+        extras,
+    }
 }
 
 fn dependency_key(requirement: &Requirement) -> PackageKey {
@@ -402,8 +455,10 @@ fn token_kind_name(kind: &ResolutionRootTokenKind) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use crate::test_support::{ArtifactFixture, PackageFixture, ResolverFixtureHarness};
-    use crate::{ArtifactKind, ResolverError};
+    use crate::test_support::{
+        ArtifactFixture, FixtureRoot, PackageFixture, ResolverFixtureHarness,
+    };
+    use crate::{ArtifactKind, ResolutionRootTokenKind, ResolverError};
 
     #[tokio::test]
     async fn resolves_direct_dependency_from_local_fixture() {
@@ -584,6 +639,135 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn group_only_packages_receive_only_group_root_tokens() {
+        let harness = ResolverFixtureHarness::new().expect("fixture harness");
+        harness
+            .add_package(
+                PackageFixture::new("pytest").with_artifact(ArtifactFixture::wheel("8.3.0")),
+            )
+            .expect("pytest fixture");
+
+        let resolved = harness
+            .resolve_roots(vec![FixtureRoot::new(
+                ResolutionRootTokenKind::DependencyGroup,
+                "dev",
+                &["pytest"],
+            )])
+            .await
+            .expect("resolution");
+
+        assert_root_tokens(package(&resolved, "pytest"), &["group:dev"]);
+    }
+
+    #[tokio::test]
+    async fn extra_only_packages_receive_only_extra_root_tokens() {
+        let harness = ResolverFixtureHarness::new().expect("fixture harness");
+        harness
+            .add_package(
+                PackageFixture::new("httpx").with_artifact(ArtifactFixture::wheel("0.28.0")),
+            )
+            .expect("httpx fixture");
+
+        let resolved = harness
+            .resolve_roots(vec![FixtureRoot::new(
+                ResolutionRootTokenKind::Extra,
+                "http",
+                &["httpx"],
+            )])
+            .await
+            .expect("resolution");
+
+        assert_root_tokens(package(&resolved, "httpx"), &["extra:http"]);
+    }
+
+    #[tokio::test]
+    async fn shared_transitive_packages_preserve_all_applicable_root_memberships() {
+        let harness = ResolverFixtureHarness::new().expect("fixture harness");
+        harness
+            .add_package(
+                PackageFixture::new("alpha")
+                    .with_artifact(ArtifactFixture::wheel("1.0.0").with_dependency("shared>=1")),
+            )
+            .expect("alpha fixture");
+        harness
+            .add_package(
+                PackageFixture::new("pytest")
+                    .with_artifact(ArtifactFixture::wheel("8.3.0").with_dependency("shared>=1")),
+            )
+            .expect("pytest fixture");
+        harness
+            .add_package(
+                PackageFixture::new("shared").with_artifact(ArtifactFixture::wheel("1.5.0")),
+            )
+            .expect("shared fixture");
+
+        let resolved = harness
+            .resolve_roots(vec![
+                FixtureRoot::new(
+                    ResolutionRootTokenKind::DependencyGroup,
+                    "pyra-default",
+                    &["alpha"],
+                ),
+                FixtureRoot::new(ResolutionRootTokenKind::DependencyGroup, "dev", &["pytest"]),
+            ])
+            .await
+            .expect("resolution");
+
+        assert_root_tokens(package(&resolved, "alpha"), &["group:pyra-default"]);
+        assert_root_tokens(package(&resolved, "pytest"), &["group:dev"]);
+        assert_root_tokens(
+            package(&resolved, "shared"),
+            &["group:dev", "group:pyra-default"],
+        );
+    }
+
+    #[tokio::test]
+    async fn marker_filtered_requirements_are_excluded_when_environment_does_not_match() {
+        let harness = ResolverFixtureHarness::new().expect("fixture harness");
+        harness
+            .add_package(PackageFixture::new("alpha").with_artifact(
+                ArtifactFixture::wheel("1.0.0").with_dependency("beta>=1; sys_platform == 'win32'"),
+            ))
+            .expect("alpha fixture");
+
+        let resolved = harness.resolve(&["alpha"]).await.expect("resolution");
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].name, "alpha");
+    }
+
+    #[tokio::test]
+    async fn duplicate_logical_declarations_across_scopes_preserve_each_root_membership_once() {
+        let harness = ResolverFixtureHarness::new().expect("fixture harness");
+        harness
+            .add_package(
+                PackageFixture::new("shared").with_artifact(ArtifactFixture::wheel("1.5.0")),
+            )
+            .expect("shared fixture");
+
+        let resolved = harness
+            .resolve_roots(vec![
+                FixtureRoot::new(
+                    ResolutionRootTokenKind::DependencyGroup,
+                    "pyra-default",
+                    &["shared>=1"],
+                ),
+                FixtureRoot::new(
+                    ResolutionRootTokenKind::DependencyGroup,
+                    "dev",
+                    &["shared>=1"],
+                ),
+            ])
+            .await
+            .expect("resolution");
+
+        assert_root_tokens(
+            package(&resolved, "shared"),
+            &["group:dev", "group:pyra-default"],
+        );
+    }
+
     fn package<'a>(
         packages: &'a [crate::ResolvedPackage],
         name: &str,
@@ -592,5 +776,24 @@ mod tests {
             .iter()
             .find(|package| package.name == name)
             .expect("resolved package")
+    }
+
+    fn assert_root_tokens(package: &crate::ResolvedPackage, expected: &[&str]) {
+        // Lock selection depends on these memberships staying precise per scope,
+        // so compare a normalized label set rather than incidental insertion order.
+        let actual = package
+            .root_tokens
+            .iter()
+            .map(|token| match token.kind {
+                ResolutionRootTokenKind::DependencyGroup => format!("group:{}", token.name),
+                ResolutionRootTokenKind::Extra => format!("extra:{}", token.name),
+            })
+            .collect::<Vec<_>>();
+        let expected = expected.iter().map(ToString::to_string).collect::<Vec<_>>();
+        assert_eq!(
+            actual, expected,
+            "unexpected root tokens for {}",
+            package.name
+        );
     }
 }
