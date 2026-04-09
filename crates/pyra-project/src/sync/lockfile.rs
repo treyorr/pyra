@@ -10,6 +10,10 @@ use toml_edit::{DocumentMut, Item, Table, Value};
 
 use crate::ProjectError;
 
+/// The current lock semantics cover one interpreter on one current platform
+/// while resolving the union of base dependencies, groups, and extras.
+pub const CURRENT_RESOLUTION_STRATEGY: &str = "current-platform-union-v1";
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct LockArtifact {
     pub name: String,
@@ -38,8 +42,8 @@ pub struct LockPackage {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub struct LockToolPyraMetadata {
-    pub input_fingerprint: String,
+pub struct LockFreshness {
+    pub dependency_fingerprint: String,
     pub interpreter_version: String,
     pub target_triple: String,
     pub index_url: String,
@@ -55,7 +59,7 @@ pub struct LockFile {
     pub dependency_groups: Vec<String>,
     pub default_groups: Vec<String>,
     pub packages: Vec<LockPackage>,
-    pub tool_pyra: LockToolPyraMetadata,
+    pub tool_pyra: LockFreshness,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -182,7 +186,7 @@ impl LockFile {
         writeln!(
             output,
             "input-fingerprint = {:?}",
-            self.tool_pyra.input_fingerprint
+            self.tool_pyra.dependency_fingerprint
         )
         .expect("string write");
         writeln!(
@@ -207,17 +211,11 @@ impl LockFile {
         })
     }
 
-    pub fn is_fresh(
-        &self,
-        fingerprint: &str,
-        interpreter_version: &str,
-        target_triple: &str,
-        index_url: &str,
-    ) -> bool {
-        self.tool_pyra.input_fingerprint == fingerprint
-            && self.tool_pyra.interpreter_version == interpreter_version
-            && self.tool_pyra.target_triple == target_triple
-            && self.tool_pyra.index_url == index_url
+    /// Lock reuse is valid only when the full freshness model matches exactly.
+    /// Keeping this comparison typed prevents the service layer from drifting
+    /// into incomplete ad hoc checks.
+    pub fn is_fresh(&self, freshness: &LockFreshness) -> bool {
+        self.tool_pyra == *freshness
     }
 }
 
@@ -356,7 +354,7 @@ fn parse_artifact(table: &Table) -> Result<LockArtifact, String> {
     })
 }
 
-fn parse_tool_pyra(document: &DocumentMut) -> Result<LockToolPyraMetadata, String> {
+fn parse_tool_pyra(document: &DocumentMut) -> Result<LockFreshness, String> {
     let table = document
         .as_table()
         .get("tool")
@@ -365,8 +363,8 @@ fn parse_tool_pyra(document: &DocumentMut) -> Result<LockToolPyraMetadata, Strin
         .and_then(Item::as_table)
         .ok_or_else(|| "missing [tool.pyra]".to_string())?;
 
-    Ok(LockToolPyraMetadata {
-        input_fingerprint: table
+    Ok(LockFreshness {
+        dependency_fingerprint: table
             .get("input-fingerprint")
             .and_then(Item::as_str)
             .ok_or_else(|| "missing tool.pyra input-fingerprint".to_string())?
@@ -398,15 +396,72 @@ fn parse_tool_pyra(document: &DocumentMut) -> Result<LockToolPyraMetadata, Strin
 mod tests {
     use camino::Utf8PathBuf;
 
-    use super::{LockArtifact, LockDependencyRef, LockFile, LockPackage, LockToolPyraMetadata};
+    use super::{
+        CURRENT_RESOLUTION_STRATEGY, LockArtifact, LockDependencyRef, LockFile, LockFreshness,
+        LockPackage,
+    };
 
     #[test]
-    fn writes_and_reads_lockfile_round_trip() {
+    fn writes_and_reads_lockfile_round_trip_including_resolution_strategy() {
         let temp_dir = tempfile::tempdir().expect("temporary directory");
         let path =
             Utf8PathBuf::from_path_buf(temp_dir.path().join("pylock.toml")).expect("utf-8 path");
-        let lock = LockFile {
-            path: path.clone(),
+        let lock = sample_lock(path.clone());
+        let freshness = sample_freshness();
+
+        lock.write().expect("write lock");
+        let reread = LockFile::read(&path).expect("read lock");
+        assert_eq!(reread, lock);
+        assert_eq!(
+            reread.tool_pyra.resolution_strategy,
+            CURRENT_RESOLUTION_STRATEGY
+        );
+        assert!(reread.is_fresh(&freshness));
+    }
+
+    #[test]
+    fn freshness_rejects_dependency_fingerprint_changes() {
+        let mut freshness = sample_freshness();
+        freshness.dependency_fingerprint = "different".to_string();
+
+        assert!(!sample_lock(Utf8PathBuf::from("/tmp/pylock.toml")).is_fresh(&freshness));
+    }
+
+    #[test]
+    fn freshness_rejects_interpreter_version_changes() {
+        let mut freshness = sample_freshness();
+        freshness.interpreter_version = "3.13.13".to_string();
+
+        assert!(!sample_lock(Utf8PathBuf::from("/tmp/pylock.toml")).is_fresh(&freshness));
+    }
+
+    #[test]
+    fn freshness_rejects_target_triple_changes() {
+        let mut freshness = sample_freshness();
+        freshness.target_triple = "x86_64-apple-darwin".to_string();
+
+        assert!(!sample_lock(Utf8PathBuf::from("/tmp/pylock.toml")).is_fresh(&freshness));
+    }
+
+    #[test]
+    fn freshness_rejects_index_url_changes() {
+        let mut freshness = sample_freshness();
+        freshness.index_url = "https://mirror.example/simple".to_string();
+
+        assert!(!sample_lock(Utf8PathBuf::from("/tmp/pylock.toml")).is_fresh(&freshness));
+    }
+
+    #[test]
+    fn freshness_rejects_resolution_strategy_changes() {
+        let mut freshness = sample_freshness();
+        freshness.resolution_strategy = "future-strategy-v2".to_string();
+
+        assert!(!sample_lock(Utf8PathBuf::from("/tmp/pylock.toml")).is_fresh(&freshness));
+    }
+
+    fn sample_lock(path: Utf8PathBuf) -> LockFile {
+        LockFile {
+            path,
             requires_python: Some("==3.13.*".to_string()),
             environments: vec!["sys_platform == 'darwin'".to_string()],
             extras: vec!["feature".to_string()],
@@ -431,23 +486,17 @@ mod tests {
                     sha256: "abc".to_string(),
                 }],
             }],
-            tool_pyra: LockToolPyraMetadata {
-                input_fingerprint: "fingerprint".to_string(),
-                interpreter_version: "3.13.12".to_string(),
-                target_triple: "aarch64-apple-darwin".to_string(),
-                index_url: "https://pypi.org/simple".to_string(),
-                resolution_strategy: "current-platform-union-v1".to_string(),
-            },
-        };
+            tool_pyra: sample_freshness(),
+        }
+    }
 
-        lock.write().expect("write lock");
-        let reread = LockFile::read(&path).expect("read lock");
-        assert_eq!(reread, lock);
-        assert!(reread.is_fresh(
-            "fingerprint",
-            "3.13.12",
-            "aarch64-apple-darwin",
-            "https://pypi.org/simple"
-        ));
+    fn sample_freshness() -> LockFreshness {
+        LockFreshness {
+            dependency_fingerprint: "fingerprint".to_string(),
+            interpreter_version: "3.13.12".to_string(),
+            target_triple: "aarch64-apple-darwin".to_string(),
+            index_url: "https://pypi.org/simple".to_string(),
+            resolution_strategy: CURRENT_RESOLUTION_STRATEGY.to_string(),
+        }
     }
 }

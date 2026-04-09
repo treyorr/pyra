@@ -22,9 +22,9 @@ use crate::{
     init::{InitProjectOutcome, create_initial_layout, validate_initial_layout},
     pyproject::{read_python_selector, update_python_selector},
     sync::{
-        EnvironmentInstaller, LockArtifact, LockDependencyRef, LockFile, LockPackage,
-        LockSelection, LockToolPyraMetadata, ProjectSyncInput, ProjectSyncInputLoader,
-        ReconciliationPlan, SyncSelectionRequest, SyncSelectionResolver,
+        CURRENT_RESOLUTION_STRATEGY, EnvironmentInstaller, LockArtifact, LockDependencyRef,
+        LockFile, LockFreshness, LockPackage, LockSelection, ProjectSyncInput,
+        ProjectSyncInputLoader, ReconciliationPlan, SyncSelectionRequest, SyncSelectionResolver,
     },
 };
 
@@ -166,25 +166,18 @@ impl ProjectService {
         let resolver_environment = resolver_environment(&installation)?;
         let index_url = std::env::var("PYRA_INDEX_URL")
             .unwrap_or_else(|_| "https://pypi.org/simple".to_string());
-        let fingerprint = input_fingerprint(&input, &resolver_environment, &index_url);
+        let freshness = lock_freshness(&input, &resolver_environment, &index_url);
         let (lock, lock_refreshed) = if input.pylock_path.exists() {
             let lock = LockFile::read(&input.pylock_path)?;
-            if lock.is_fresh(
-                &fingerprint,
-                &installation.version.to_string(),
-                &resolver_environment.target_triple,
-                &index_url,
-            ) {
+            if lock.is_fresh(&freshness) {
                 (lock, false)
             } else {
-                let lock =
-                    resolve_lock(&input, &resolver_environment, &index_url, &fingerprint).await?;
+                let lock = resolve_lock(&input, &resolver_environment, &freshness).await?;
                 lock.write()?;
                 (lock, true)
             }
         } else {
-            let lock =
-                resolve_lock(&input, &resolver_environment, &index_url, &fingerprint).await?;
+            let lock = resolve_lock(&input, &resolver_environment, &freshness).await?;
             lock.write()?;
             (lock, true)
         };
@@ -288,12 +281,11 @@ fn marker_platform_fields(
     }
 }
 
-fn input_fingerprint(
-    input: &ProjectSyncInput,
-    env: &ResolverEnvironment,
-    index_url: &str,
-) -> String {
+fn dependency_fingerprint(input: &ProjectSyncInput) -> String {
     let mut digest = Sha256::new();
+    // Keep the fingerprint scoped to declared project inputs. Interpreter,
+    // target, index, and strategy stay as separate typed freshness fields so
+    // lock reuse can report and compare each documented dimension explicitly.
     digest.update(input.project_name.as_bytes());
     digest.update(input.pinned_python.to_string().as_bytes());
     if let Some(requires_python) = &input.requires_python {
@@ -314,18 +306,27 @@ fn input_fingerprint(
             digest.update(requirement.requirement.to_string().as_bytes());
         }
     }
-    digest.update(env.python_full_version.as_bytes());
-    digest.update(env.target_triple.as_bytes());
-    digest.update(index_url.as_bytes());
-    digest.update(b"current-platform-union-v1");
     format!("{:x}", digest.finalize())
+}
+
+fn lock_freshness(
+    input: &ProjectSyncInput,
+    env: &ResolverEnvironment,
+    index_url: &str,
+) -> LockFreshness {
+    LockFreshness {
+        dependency_fingerprint: dependency_fingerprint(input),
+        interpreter_version: env.python_full_version.clone(),
+        target_triple: env.target_triple.clone(),
+        index_url: index_url.to_string(),
+        resolution_strategy: CURRENT_RESOLUTION_STRATEGY.to_string(),
+    }
 }
 
 async fn resolve_lock(
     input: &ProjectSyncInput,
     env: &ResolverEnvironment,
-    index_url: &str,
-    fingerprint: &str,
+    freshness: &LockFreshness,
 ) -> Result<LockFile, ProjectError> {
     let mut roots = Vec::new();
     roots.push(ResolutionRoot {
@@ -370,7 +371,7 @@ async fn resolve_lock(
         .resolve(ResolutionRequest {
             environment: env.clone(),
             roots,
-            index_url: index_url.to_string(),
+            index_url: freshness.index_url.clone(),
         })
         .await
         .map_err(|source| ProjectError::ResolveDependencies { source })?;
@@ -403,7 +404,7 @@ async fn resolve_lock(
                         Some(marker)
                     },
                     requires_python: package.requires_python,
-                    index: Some(index_url.to_string()),
+                    index: Some(freshness.index_url.clone()),
                     dependencies: package
                         .dependencies
                         .into_iter()
@@ -430,13 +431,7 @@ async fn resolve_lock(
                 }
             })
             .collect(),
-        tool_pyra: LockToolPyraMetadata {
-            input_fingerprint: fingerprint.to_string(),
-            interpreter_version: env.python_full_version.clone(),
-            target_triple: env.target_triple.clone(),
-            index_url: index_url.to_string(),
-            resolution_strategy: "current-platform-union-v1".to_string(),
-        },
+        tool_pyra: freshness.clone(),
     })
 }
 

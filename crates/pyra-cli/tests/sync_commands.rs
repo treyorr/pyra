@@ -147,6 +147,106 @@ python = "3.13.12"
 }
 
 #[test]
+fn sync_reuses_fresh_lock_when_freshness_inputs_are_unchanged() {
+    let home = temp_env_root();
+    let index = start_fixture_index();
+    let project_root = home
+        .path()
+        .join("workspace")
+        .join("sample-sync-fresh-reuse");
+    fs::create_dir_all(&project_root).expect("project root");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        r#"[project]
+name = "sample-sync-fresh-reuse"
+version = "0.1.0"
+requires-python = "==3.13.*"
+dependencies = ["attrs==25.1.0"]
+
+[tool.pyra]
+python = "3.13.12"
+"#,
+    )
+    .expect("pyproject");
+
+    seed_managed_install(&home, "3.13.12").expect("managed install");
+    let state_path = home.path().join("installer-state.json");
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .env("PYRA_INDEX_URL", &index.base_url)
+        .args(["sync"])
+        .assert()
+        .success();
+
+    let first_lock = fs::read_to_string(project_root.join("pylock.toml")).expect("pylock");
+    assert!(first_lock.contains("resolution-strategy = \"current-platform-union-v1\""));
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .env("PYRA_INDEX_URL", &index.base_url)
+        .args(["sync"])
+        .assert()
+        .success()
+        .stdout(contains("Reused the current lock"));
+
+    let second_lock = fs::read_to_string(project_root.join("pylock.toml")).expect("pylock");
+    assert_eq!(first_lock, second_lock);
+}
+
+#[test]
+fn sync_regenerates_stale_lock_when_resolution_strategy_changes() {
+    let home = temp_env_root();
+    let index = start_fixture_index();
+    let project_root = home
+        .path()
+        .join("workspace")
+        .join("sample-sync-stale-strategy");
+    fs::create_dir_all(&project_root).expect("project root");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        r#"[project]
+name = "sample-sync-stale-strategy"
+version = "0.1.0"
+requires-python = "==3.13.*"
+dependencies = ["attrs==25.1.0"]
+
+[tool.pyra]
+python = "3.13.12"
+"#,
+    )
+    .expect("pyproject");
+
+    seed_managed_install(&home, "3.13.12").expect("managed install");
+    let state_path = home.path().join("installer-state.json");
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .env("PYRA_INDEX_URL", &index.base_url)
+        .args(["sync"])
+        .assert()
+        .success();
+
+    let lock_path = project_root.join("pylock.toml");
+    let stale_lock = fs::read_to_string(&lock_path).expect("pylock").replace(
+        "resolution-strategy = \"current-platform-union-v1\"",
+        "resolution-strategy = \"legacy-strategy-v0\"",
+    );
+    fs::write(&lock_path, stale_lock).expect("stale lock");
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .env("PYRA_INDEX_URL", &index.base_url)
+        .args(["sync"])
+        .assert()
+        .success()
+        .stdout(contains("Updated `pylock.toml`"));
+
+    let regenerated_lock = fs::read_to_string(&lock_path).expect("pylock");
+    assert!(regenerated_lock.contains("resolution-strategy = \"current-platform-union-v1\""));
+}
+
+#[test]
 fn sync_regenerates_stale_lock_after_dependency_change() {
     let home = temp_env_root();
     let index = start_fixture_index();

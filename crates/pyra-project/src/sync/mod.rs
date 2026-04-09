@@ -13,7 +13,8 @@ mod selection;
 
 pub use install::{EnvironmentInstaller, ReconciliationPlan};
 pub use lockfile::{
-    LockArtifact, LockDependencyRef, LockFile, LockPackage, LockSelection, LockToolPyraMetadata,
+    CURRENT_RESOLUTION_STRATEGY, LockArtifact, LockDependencyRef, LockFile, LockFreshness,
+    LockPackage, LockSelection,
 };
 pub use project_input::{ProjectSyncInput, ProjectSyncInputLoader};
 pub use selection::{SyncSelectionRequest, SyncSelectionResolver};
