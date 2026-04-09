@@ -53,7 +53,9 @@ Current command requirements:
 - `pyra sync` requires `[project].name`.
 - `pyra sync` can operate without `[project].requires-python`, but the current
   product direction is that pinned interpreter and project Python constraints
-  should converge over time.
+  should converge over time. When `[project].requires-python` is present, the
+  selected managed interpreter must satisfy it or sync fails before lock reuse
+  and resolution.
 - `pyra sync` supports empty dependency lists.
 - `pyra sync` treats `[build-system]` as the switch for editable project
   installation.

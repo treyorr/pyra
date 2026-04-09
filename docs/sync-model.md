@@ -23,6 +23,8 @@ The current sync input model includes:
 
 Sync fails if the project does not pin a Python version first. `pyra sync`
 targets one Pyra-managed interpreter and one current platform in this slice.
+If `[project].requires-python` is present, sync also fails before lock reuse or
+resolution when that selected interpreter falls outside the declared range.
 
 ## Lock Freshness
 

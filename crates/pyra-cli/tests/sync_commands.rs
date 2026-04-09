@@ -228,6 +228,39 @@ dependencies = []
 }
 
 #[test]
+fn sync_fails_when_project_requires_python_excludes_pinned_interpreter() {
+    let home = temp_env_root();
+    let project_root = home
+        .path()
+        .join("workspace")
+        .join("sample-sync-requires-python-mismatch");
+    fs::create_dir_all(&project_root).expect("project root");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        r#"[project]
+name = "sample-sync-requires-python-mismatch"
+version = "0.1.0"
+requires-python = "<3.13"
+dependencies = []
+
+[tool.pyra]
+python = "3.13.12"
+"#,
+    )
+    .expect("pyproject");
+    seed_managed_install(&home, "3.13.12").expect("managed install");
+    let state_path = home.path().join("installer-state.json");
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .args(["sync"])
+        .assert()
+        .failure()
+        .stderr(contains("3.13.12"))
+        .stderr(contains("<3.13"));
+}
+
+#[test]
 fn sync_fails_for_invalid_dependency_group_config() {
     let home = temp_env_root();
     let project_root = home

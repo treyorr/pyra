@@ -8,8 +8,9 @@ use std::fs;
 use std::str::FromStr;
 
 use camino::Utf8PathBuf;
+use pep440_rs::{Version, VersionSpecifiers};
 use pep508_rs::Requirement;
-use pyra_python::PythonVersionRequest;
+use pyra_python::{PythonVersion, PythonVersionRequest};
 use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, Value};
 
 use crate::{
@@ -65,6 +66,40 @@ impl ProjectSyncInput {
         self.dependency_groups
             .iter()
             .any(|group| group.name.normalized_name == "dev")
+    }
+
+    /// Enforces the project's declared interpreter support before sync tries to
+    /// reuse a lock or resolve a new one.
+    pub fn validate_selected_interpreter(
+        &self,
+        interpreter: &PythonVersion,
+    ) -> Result<(), ProjectError> {
+        let Some(requires_python) = &self.requires_python else {
+            return Ok(());
+        };
+
+        let specifiers = VersionSpecifiers::from_str(requires_python).map_err(|error| {
+            ProjectError::InvalidRequiresPython {
+                path: self.pyproject_path.to_string(),
+                value: requires_python.clone(),
+                detail: error.to_string(),
+            }
+        })?;
+        let interpreter = Version::from_str(&interpreter.to_string()).map_err(|error| {
+            ProjectError::InvalidManagedPythonVersion {
+                value: interpreter.to_string(),
+                detail: error.to_string(),
+            }
+        })?;
+
+        if specifiers.contains(&interpreter) {
+            Ok(())
+        } else {
+            Err(ProjectError::PinnedPythonIncompatibleWithProject {
+                interpreter: interpreter.to_string(),
+                requires_python: requires_python.clone(),
+            })
+        }
     }
 }
 

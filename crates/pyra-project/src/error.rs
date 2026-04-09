@@ -97,6 +97,19 @@ pub enum ProjectError {
     MissingProjectMetadata,
     #[error("the current project is missing [project].name")]
     MissingProjectName,
+    #[error("the current project has an invalid [project].requires-python constraint")]
+    InvalidRequiresPython {
+        path: String,
+        value: String,
+        detail: String,
+    },
+    #[error("the selected managed interpreter is outside the project's requires-python constraint")]
+    PinnedPythonIncompatibleWithProject {
+        interpreter: String,
+        requires_python: String,
+    },
+    #[error("the selected managed interpreter version is not PEP 440-compatible")]
+    InvalidManagedPythonVersion { value: String, detail: String },
     #[error("dependency group `{name}` is not valid")]
     InvalidDependencyGroupDefinition { name: String },
     #[error("dependency group `{group}` contains an invalid entry")]
@@ -306,6 +319,41 @@ impl UserFacingError for ProjectError {
             )
             .with_detail("The project name is needed for editable installation and lockfile metadata.")
             .with_suggestion("Add `name = \"...\"` under `[project]` and retry."),
+            Self::InvalidRequiresPython {
+                path,
+                value,
+                detail,
+            } => ErrorReport::new(
+                ErrorKind::User,
+                format!("Pyra could not parse `[project].requires-python` in `{path}`."),
+            )
+            .with_detail(format!(
+                "The project constraint `{value}` is not a valid PEP 440 version specifier set."
+            ))
+            .with_suggestion("Fix `[project].requires-python` and retry `pyra sync`.")
+            .with_verbose_detail(detail.clone()),
+            Self::PinnedPythonIncompatibleWithProject {
+                interpreter,
+                requires_python,
+            } => ErrorReport::new(
+                ErrorKind::User,
+                format!(
+                    "Project `requires-python` `{requires_python}` does not allow Python {interpreter}."
+                ),
+            )
+            .with_detail(format!(
+                "Pyra only syncs a project when the selected managed interpreter satisfies the project's declared Python support range. The current project pins Python {interpreter}."
+            ))
+            .with_suggestion(
+                "Repin the project with `pyra use <version>` or update `[project].requires-python`, then retry.",
+            ),
+            Self::InvalidManagedPythonVersion { value, detail } => ErrorReport::new(
+                ErrorKind::Internal,
+                "Pyra could not validate the selected managed interpreter version.",
+            )
+            .with_detail("Pyra stored a concrete managed Python version that no longer matches the version format expected by `requires-python` enforcement.")
+            .with_suggestion("Retry later or report this issue.")
+            .with_verbose_detail(format!("value `{value}`: {detail}")),
             Self::InvalidDependencyGroupDefinition { name } => ErrorReport::new(
                 ErrorKind::User,
                 format!("Dependency group `{name}` is not valid."),

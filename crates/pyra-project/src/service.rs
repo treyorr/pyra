@@ -153,6 +153,7 @@ impl ProjectService {
                 selector: input.pinned_python.to_string(),
                 source,
             })?;
+        input.validate_selected_interpreter(&installation.version)?;
         let selection = SyncSelectionResolver.resolve(&input, &request.selection)?;
         let environment = ProjectEnvironmentStore.ensure(
             context,
@@ -496,10 +497,18 @@ pub struct InitProjectWithPythonOutcome {
 
 #[cfg(test)]
 mod tests {
-    use camino::Utf8PathBuf;
-    use pyra_python::{ArchiveFormat, InstalledPythonRecord, PythonVersion};
+    use std::fs;
+    use std::path::PathBuf;
+    use std::process::Command as ProcessCommand;
+    use std::sync::{Mutex, OnceLock};
 
-    use super::ProjectService;
+    use camino::Utf8PathBuf;
+    use pyra_core::{AppContext, AppPaths, Verbosity};
+    use pyra_errors::UserFacingError;
+    use pyra_python::{ArchiveFormat, HostTarget, InstalledPythonRecord, PythonVersion};
+
+    use super::{ProjectService, SyncProjectRequest};
+    use crate::ProjectError;
 
     #[test]
     fn selects_latest_installed_python_version() {
@@ -511,6 +520,170 @@ mod tests {
         .expect("latest installation");
 
         assert_eq!(latest.version, PythonVersion::parse("3.13.12").unwrap());
+    }
+
+    #[tokio::test]
+    async fn sync_accepts_compatible_project_requires_python() {
+        let _guard = installer_state_lock().lock().expect("installer state lock");
+        let temp_dir = tempfile::tempdir().expect("temporary directory");
+        let root = Utf8PathBuf::from_path_buf(temp_dir.path().join("workspace").join("sample"))
+            .expect("utf-8 project root");
+        fs::create_dir_all(&root).expect("project root");
+        let context = context_for_project(temp_dir.path(), &root);
+        let _stub_state = stub_installer_state(&root.join("installer-state.json"));
+        write_pyproject(
+            &root.join("pyproject.toml"),
+            r#"[project]
+name = "sample"
+version = "0.1.0"
+requires-python = ">=3.13,<3.14"
+dependencies = []
+
+[tool.pyra]
+python = "3.13.12"
+"#,
+        );
+        seed_managed_install(&context, "3.13.12").expect("managed install");
+
+        let outcome = ProjectService
+            .sync(&context, SyncProjectRequest::default())
+            .await
+            .expect("compatible sync succeeds");
+
+        assert_eq!(outcome.python_version, "3.13.12");
+        assert!(outcome.lock_refreshed);
+        assert!(root.join("pylock.toml").exists());
+    }
+
+    #[tokio::test]
+    async fn sync_rejects_incompatible_project_requires_python_before_lock_reuse() {
+        let _guard = installer_state_lock().lock().expect("installer state lock");
+        let temp_dir = tempfile::tempdir().expect("temporary directory");
+        let root = Utf8PathBuf::from_path_buf(temp_dir.path().join("workspace").join("sample"))
+            .expect("utf-8 project root");
+        fs::create_dir_all(&root).expect("project root");
+        let context = context_for_project(temp_dir.path(), &root);
+        write_pyproject(
+            &root.join("pyproject.toml"),
+            r#"[project]
+name = "sample"
+version = "0.1.0"
+requires-python = "<3.13"
+dependencies = []
+
+[tool.pyra]
+python = "3.13.12"
+"#,
+        );
+        fs::write(root.join("pylock.toml"), "not valid toml").expect("pylock");
+        seed_managed_install(&context, "3.13.12").expect("managed install");
+
+        let error = ProjectService
+            .sync(&context, SyncProjectRequest::default())
+            .await
+            .expect_err("incompatible sync fails");
+
+        assert!(matches!(
+            error,
+            ProjectError::PinnedPythonIncompatibleWithProject {
+                ref interpreter,
+                ref requires_python
+            } if interpreter == "3.13.12" && requires_python == "<3.13"
+        ));
+        let report = error.report();
+        assert!(report.summary.contains("3.13.12"));
+        assert!(report.summary.contains("<3.13"));
+        assert!(!context.paths.project_environments_dir().exists());
+    }
+
+    fn installer_state_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn stub_installer_state(path: &camino::Utf8Path) -> StubInstallerState {
+        fs::write(path, "{}\n").expect("stub installer state");
+        // The installer stub is selected through a process-wide environment
+        // variable, so tests serialize access before mutating it.
+        unsafe {
+            std::env::set_var("PYRA_SYNC_INSTALLER_STATE_PATH", path.as_str());
+        }
+        StubInstallerState
+    }
+
+    fn context_for_project(
+        temp_root: &std::path::Path,
+        project_root: &camino::Utf8Path,
+    ) -> AppContext {
+        let config_dir =
+            Utf8PathBuf::from_path_buf(temp_root.join("config")).expect("utf-8 config");
+        let data_dir = Utf8PathBuf::from_path_buf(temp_root.join("data")).expect("utf-8 data");
+        let cache_dir = Utf8PathBuf::from_path_buf(temp_root.join("cache")).expect("utf-8 cache");
+        let state_dir = Utf8PathBuf::from_path_buf(temp_root.join("state")).expect("utf-8 state");
+        let paths = AppPaths::from_roots(config_dir, data_dir, cache_dir, state_dir);
+        AppContext::new(project_root.to_path_buf(), paths, Verbosity::Normal)
+    }
+
+    fn write_pyproject(path: &camino::Utf8Path, contents: &str) {
+        fs::write(path, contents).expect("pyproject");
+    }
+
+    fn seed_managed_install(
+        context: &AppContext,
+        version: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let install_dir = context.paths.python_version_dir(version);
+        fs::create_dir_all(&install_dir)?;
+
+        let record = InstalledPythonRecord {
+            version: PythonVersion::parse(version)?,
+            implementation: "cpython".to_string(),
+            build_id: "20260325".to_string(),
+            target_triple: HostTarget::detect()?.target_triple().to_string(),
+            asset_name: format!("cpython-{version}.tar.gz"),
+            archive_format: ArchiveFormat::TarGz,
+            download_url: "file:///dev/null".to_string(),
+            checksum_sha256: None,
+            install_dir,
+            executable_path: Utf8PathBuf::from_path_buf(system_python()?)
+                .expect("utf-8 python path"),
+        };
+
+        fs::write(
+            record.install_dir.join("installation.json"),
+            serde_json::to_vec_pretty(&record)?,
+        )?;
+
+        Ok(())
+    }
+
+    fn system_python() -> Result<PathBuf, Box<dyn std::error::Error>> {
+        for candidate in ["python3", "python"] {
+            let output = ProcessCommand::new(candidate)
+                .args(["-c", "import sys; print(sys.executable)"])
+                .output();
+            match output {
+                Ok(output) if output.status.success() => {
+                    let path = String::from_utf8(output.stdout)?.trim().to_string();
+                    if !path.is_empty() {
+                        return Ok(PathBuf::from(path));
+                    }
+                }
+                Ok(_) | Err(_) => {}
+            }
+        }
+
+        Err("no usable system python was found for service tests".into())
+    }
+
+    struct StubInstallerState;
+
+    impl Drop for StubInstallerState {
+        fn drop(&mut self) {
+            unsafe {
+                std::env::remove_var("PYRA_SYNC_INSTALLER_STATE_PATH");
+            }
+        }
     }
 
     fn record(version: &str) -> InstalledPythonRecord {
