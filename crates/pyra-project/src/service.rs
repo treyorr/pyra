@@ -23,8 +23,9 @@ use crate::{
     pyproject::{read_python_selector, update_python_selector},
     sync::{
         CURRENT_RESOLUTION_STRATEGY, EnvironmentInstaller, LockArtifact, LockDependencyRef,
-        LockFile, LockFreshness, LockPackage, LockSelection, ProjectSyncInput,
-        ProjectSyncInputLoader, ReconciliationPlan, SyncSelectionRequest, SyncSelectionResolver,
+        LockFile, LockFreshness, LockMarker, LockMarkerClause, LockPackage, LockSelection,
+        ProjectSyncInput, ProjectSyncInputLoader, ReconciliationPlan, SyncSelectionRequest,
+        SyncSelectionResolver,
     },
 };
 
@@ -393,42 +394,31 @@ async fn resolve_lock(
         default_groups: default_group_names(input),
         packages: packages
             .into_iter()
-            .map(|package| {
-                let marker = package_marker(&package.root_tokens);
-                LockPackage {
-                    name: package.name,
-                    version: package.version,
-                    marker: if marker.is_empty() {
-                        None
-                    } else {
-                        Some(marker)
-                    },
-                    requires_python: package.requires_python,
-                    index: Some(freshness.index_url.clone()),
-                    dependencies: package
-                        .dependencies
-                        .into_iter()
-                        .map(|dependency| LockDependencyRef {
-                            name: dependency.name,
-                            version: dependency.version,
-                        })
-                        .collect(),
-                    sdist: package
-                        .artifacts
-                        .iter()
-                        .find(|artifact| {
-                            matches!(artifact.kind, pyra_resolver::ArtifactKind::Sdist)
-                        })
-                        .map(map_artifact),
-                    wheels: package
-                        .artifacts
-                        .iter()
-                        .filter(|artifact| {
-                            matches!(artifact.kind, pyra_resolver::ArtifactKind::Wheel)
-                        })
-                        .map(map_artifact)
-                        .collect(),
-                }
+            .map(|package| LockPackage {
+                name: package.name,
+                version: package.version,
+                marker: package_marker(&package.root_tokens),
+                requires_python: package.requires_python,
+                index: Some(freshness.index_url.clone()),
+                dependencies: package
+                    .dependencies
+                    .into_iter()
+                    .map(|dependency| LockDependencyRef {
+                        name: dependency.name,
+                        version: dependency.version,
+                    })
+                    .collect(),
+                sdist: package
+                    .artifacts
+                    .iter()
+                    .find(|artifact| matches!(artifact.kind, pyra_resolver::ArtifactKind::Sdist))
+                    .map(map_artifact),
+                wheels: package
+                    .artifacts
+                    .iter()
+                    .filter(|artifact| matches!(artifact.kind, pyra_resolver::ArtifactKind::Wheel))
+                    .map(map_artifact)
+                    .collect(),
             })
             .collect(),
         tool_pyra: freshness.clone(),
@@ -452,19 +442,17 @@ fn default_group_names(input: &ProjectSyncInput) -> Vec<String> {
     groups
 }
 
-fn package_marker(tokens: &[ResolutionRootToken]) -> String {
-    let mut tokens = tokens
+fn package_marker(tokens: &[ResolutionRootToken]) -> Option<LockMarker> {
+    let clauses = tokens
         .iter()
         .map(|token| match token.kind {
             ResolutionRootTokenKind::DependencyGroup => {
-                format!("'{}' in dependency_groups", token.name)
+                LockMarkerClause::dependency_group(token.name.clone())
             }
-            ResolutionRootTokenKind::Extra => format!("'{}' in extras", token.name),
+            ResolutionRootTokenKind::Extra => LockMarkerClause::extra(token.name.clone()),
         })
         .collect::<Vec<_>>();
-    tokens.sort();
-    tokens.dedup();
-    tokens.join(" or ")
+    LockMarker::from_clauses(clauses)
 }
 
 fn map_artifact(artifact: &pyra_resolver::ArtifactRecord) -> LockArtifact {

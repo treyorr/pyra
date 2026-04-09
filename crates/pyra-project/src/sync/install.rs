@@ -214,33 +214,18 @@ impl ReconciliationPlan {
     pub fn for_selection(packages: &[LockPackage], selection: &LockSelection) -> Vec<LockPackage> {
         packages
             .iter()
-            .filter(|package| marker_matches(package.marker.as_deref(), selection))
+            .filter(|package| marker_matches(package.marker.as_ref(), selection))
             .cloned()
             .collect()
     }
 }
 
-fn marker_matches(marker: Option<&str>, selection: &LockSelection) -> bool {
+fn marker_matches(marker: Option<&crate::sync::LockMarker>, selection: &LockSelection) -> bool {
     let Some(marker) = marker else {
         return true;
     };
 
-    marker.split(" or ").any(|clause| {
-        let clause = clause.trim();
-        if let Some(name) = clause
-            .strip_prefix('\'')
-            .and_then(|value| value.split_once("' in extras"))
-        {
-            return selection.extras.contains(name.0);
-        }
-        if let Some(name) = clause
-            .strip_prefix('\'')
-            .and_then(|value| value.split_once("' in dependency_groups"))
-        {
-            return selection.groups.contains(name.0);
-        }
-        false
-    })
+    marker.matches(selection)
 }
 
 fn read_stub_state(path: &str) -> Result<BTreeMap<String, String>, ProjectError> {
@@ -311,7 +296,7 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
     use super::{ReconciliationPlan, ReconciliationPlanAction};
-    use crate::sync::{LockPackage, LockSelection};
+    use crate::sync::{LockMarker, LockMarkerClause, LockPackage, LockSelection};
 
     #[test]
     fn builds_exact_reconciliation_plan() {
@@ -319,9 +304,13 @@ mod tests {
             package(
                 "attrs",
                 "25.1.0",
-                Some("'pyra-default' in dependency_groups"),
+                LockMarker::from_clauses(vec![LockMarkerClause::dependency_group("pyra-default")]),
             ),
-            package("pytest", "8.3.0", Some("'dev' in dependency_groups")),
+            package(
+                "pytest",
+                "8.3.0",
+                LockMarker::from_clauses(vec![LockMarkerClause::dependency_group("dev")]),
+            ),
         ];
         let selected = ReconciliationPlan::for_selection(
             &packages,
@@ -348,11 +337,56 @@ mod tests {
         }));
     }
 
-    fn package(name: &str, version: &str, marker: Option<&str>) -> LockPackage {
+    #[test]
+    fn selects_mixed_group_and_extra_markers() {
+        let packages = vec![
+            package(
+                "attrs",
+                "25.1.0",
+                LockMarker::from_clauses(vec![LockMarkerClause::dependency_group("pyra-default")]),
+            ),
+            package(
+                "pytest",
+                "8.3.0",
+                LockMarker::from_clauses(vec![
+                    LockMarkerClause::dependency_group("dev"),
+                    LockMarkerClause::extra("feature"),
+                ]),
+            ),
+            package(
+                "sphinx",
+                "7.4.0",
+                LockMarker::from_clauses(vec![LockMarkerClause::dependency_group("docs")]),
+            ),
+            package(
+                "rich-extra",
+                "1.0.0",
+                LockMarker::from_clauses(vec![LockMarkerClause::extra("feature")]),
+            ),
+        ];
+
+        let selected = ReconciliationPlan::for_selection(
+            &packages,
+            &LockSelection {
+                groups: ["pyra-default".to_string(), "dev".to_string()]
+                    .into_iter()
+                    .collect(),
+                extras: ["feature".to_string()].into_iter().collect(),
+            },
+        );
+
+        let selected_names = selected
+            .iter()
+            .map(|package| package.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(selected_names, vec!["attrs", "pytest", "rich-extra"]);
+    }
+
+    fn package(name: &str, version: &str, marker: Option<LockMarker>) -> LockPackage {
         LockPackage {
             name: name.to_string(),
             version: version.to_string(),
-            marker: marker.map(ToString::to_string),
+            marker,
             requires_python: None,
             index: None,
             dependencies: Vec::new(),

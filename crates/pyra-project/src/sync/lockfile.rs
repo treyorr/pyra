@@ -10,6 +10,8 @@ use toml_edit::{DocumentMut, Item, Table, Value};
 
 use crate::ProjectError;
 
+use super::LockMarker;
+
 /// The current lock semantics cover one interpreter on one current platform
 /// while resolving the union of base dependencies, groups, and extras.
 pub const CURRENT_RESOLUTION_STRATEGY: &str = "current-platform-union-v1";
@@ -33,7 +35,7 @@ pub struct LockDependencyRef {
 pub struct LockPackage {
     pub name: String,
     pub version: String,
-    pub marker: Option<String>,
+    pub marker: Option<LockMarker>,
     pub requires_python: Option<String>,
     pub index: Option<String>,
     pub dependencies: Vec<LockDependencyRef>,
@@ -159,7 +161,7 @@ impl LockFile {
             writeln!(output, "name = {:?}", package.name).expect("string write");
             writeln!(output, "version = {:?}", package.version).expect("string write");
             if let Some(marker) = &package.marker {
-                writeln!(output, "marker = {:?}", marker).expect("string write");
+                writeln!(output, "marker = {:?}", marker.to_string()).expect("string write");
             }
             if let Some(requires_python) = &package.requires_python {
                 writeln!(output, "requires-python = {:?}", requires_python).expect("string write");
@@ -318,7 +320,7 @@ fn parse_package(table: &Table) -> Result<LockPackage, String> {
             .and_then(Item::as_str)
             .ok_or_else(|| "package missing version".to_string())?
             .to_string(),
-        marker: string_value(table.get("marker")),
+        marker: parse_marker(table.get("marker"))?,
         requires_python: string_value(table.get("requires-python")),
         index: string_value(table.get("index")),
         dependencies,
@@ -352,6 +354,15 @@ fn parse_artifact(table: &Table) -> Result<LockArtifact, String> {
             .ok_or_else(|| "artifact missing sha256".to_string())?
             .to_string(),
     })
+}
+
+fn parse_marker(item: Option<&Item>) -> Result<Option<LockMarker>, String> {
+    let Some(marker) = string_value(item) else {
+        return Ok(None);
+    };
+    LockMarker::parse(&marker)
+        .map(Some)
+        .map_err(|detail| format!("invalid package marker `{marker}`: {detail}"))
 }
 
 fn parse_tool_pyra(document: &DocumentMut) -> Result<LockFreshness, String> {
@@ -394,12 +405,15 @@ fn parse_tool_pyra(document: &DocumentMut) -> Result<LockFreshness, String> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use camino::Utf8PathBuf;
 
     use super::{
         CURRENT_RESOLUTION_STRATEGY, LockArtifact, LockDependencyRef, LockFile, LockFreshness,
-        LockPackage,
+        LockMarker, LockPackage,
     };
+    use crate::sync::LockMarkerClause;
 
     #[test]
     fn writes_and_reads_lockfile_round_trip_including_resolution_strategy() {
@@ -417,6 +431,70 @@ mod tests {
             CURRENT_RESOLUTION_STRATEGY
         );
         assert!(reread.is_fresh(&freshness));
+    }
+
+    #[test]
+    fn round_trips_generated_markers() {
+        let temp_dir = tempfile::tempdir().expect("temporary directory");
+        let path =
+            Utf8PathBuf::from_path_buf(temp_dir.path().join("pylock.toml")).expect("utf-8 path");
+        let mut lock = sample_lock(path.clone());
+        lock.packages[0].marker = LockMarker::from_clauses(vec![
+            LockMarkerClause::dependency_group("dev"),
+            LockMarkerClause::extra("feature"),
+            LockMarkerClause::dependency_group("pyra-default"),
+        ]);
+
+        lock.write().expect("write lock");
+        let reread = LockFile::read(&path).expect("read lock");
+
+        assert_eq!(reread.packages[0].marker, lock.packages[0].marker);
+        assert_eq!(
+            reread.packages[0].marker.as_ref().map(ToString::to_string),
+            Some(
+                "'dev' in dependency_groups or 'pyra-default' in dependency_groups or 'feature' in extras"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_package_markers() {
+        let temp_dir = tempfile::tempdir().expect("temporary directory");
+        let path =
+            Utf8PathBuf::from_path_buf(temp_dir.path().join("pylock.toml")).expect("utf-8 path");
+        fs::write(
+            path.as_std_path(),
+            r#"
+lock-version = "1.0"
+environments = []
+extras = []
+dependency-groups = []
+default-groups = []
+created-by = "pyra"
+
+[[packages]]
+name = "attrs"
+version = "25.1.0"
+marker = "'dev' in dependency_groups or"
+
+[tool.pyra]
+input-fingerprint = "fingerprint"
+interpreter-version = "3.13.12"
+target-triple = "aarch64-apple-darwin"
+index-url = "https://pypi.org/simple"
+resolution-strategy = "current-platform-union-v1"
+"#,
+        )
+        .expect("write invalid lock");
+
+        let error = LockFile::read(&path).expect_err("invalid lock");
+        match error {
+            crate::ProjectError::ParseLockfile { detail, .. } => {
+                assert!(detail.contains("invalid package marker"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]
@@ -470,7 +548,9 @@ mod tests {
             packages: vec![LockPackage {
                 name: "attrs".to_string(),
                 version: "25.1.0".to_string(),
-                marker: Some("'pyra-default' in dependency_groups".to_string()),
+                marker: LockMarker::from_clauses(vec![LockMarkerClause::dependency_group(
+                    "pyra-default",
+                )]),
                 requires_python: None,
                 index: Some("https://pypi.org/simple".to_string()),
                 dependencies: vec![LockDependencyRef {

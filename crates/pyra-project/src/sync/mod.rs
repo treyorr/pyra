@@ -8,6 +8,7 @@
 
 mod install;
 mod lockfile;
+mod marker;
 mod project_input;
 mod selection;
 
@@ -16,5 +17,6 @@ pub use lockfile::{
     CURRENT_RESOLUTION_STRATEGY, LockArtifact, LockDependencyRef, LockFile, LockFreshness,
     LockPackage, LockSelection,
 };
+pub(crate) use marker::{LockMarker, LockMarkerClause};
 pub use project_input::{ProjectSyncInput, ProjectSyncInputLoader};
 pub use selection::{SyncSelectionRequest, SyncSelectionResolver};
