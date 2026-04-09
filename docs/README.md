@@ -29,6 +29,8 @@ Then read the more specific docs that apply to the task:
 - `docs/run-model.md`
 - `docs/error-model.md`
 - `docs/testing-strategy.md`
+- `docs/product-direction.md`
+- `docs/execution-roadmap.md`
 
 ## What Each Doc Answers
 
@@ -59,12 +61,21 @@ Then read the more specific docs that apply to the task:
 - `docs/run-model.md`
   How future execution should build on the synchronized environment model.
 
+### Product direction
+
+- `docs/product-direction.md`
+  The high-level picture of what Pyra is now, what it must become next, and how
+  longer-term runtime features should build on the package-manager foundation.
+
 ### Quality and maintainership
 
 - `docs/error-model.md`
   How Pyra should communicate failures.
 - `docs/testing-strategy.md`
   How Pyra should test package management behavior safely and deterministically.
+- `docs/execution-roadmap.md`
+  The implementation roadmap, milestone order, and stable task IDs for
+  execution planning.
 
 ## Documentation Rules
 
