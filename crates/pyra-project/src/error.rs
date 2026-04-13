@@ -206,6 +206,8 @@ pub enum ProjectError {
         #[source]
         source: io::Error,
     },
+    #[error("parallel artifact preparation task failed unexpectedly")]
+    ArtifactPreparationTask { detail: String },
     #[error("downloaded artifact hash did not match for `{package}`")]
     LockedArtifactHashMismatch {
         package: String,
@@ -605,6 +607,13 @@ impl UserFacingError for ProjectError {
             .with_detail("Pyra tried to remove a verified-artifact cache or staging file after a failure.")
             .with_suggestion("Remove the artifact file manually and retry.")
             .with_verbose_detail(source.to_string()),
+            Self::ArtifactPreparationTask { detail } => ErrorReport::new(
+                ErrorKind::Internal,
+                "Pyra could not finish preparing locked artifacts.",
+            )
+            .with_detail("An internal async installer task stopped unexpectedly while Pyra was verifying locked package artifacts.")
+            .with_suggestion("Retry the sync. If this keeps happening, report the failure.")
+            .with_verbose_detail(detail.clone()),
             Self::LockedArtifactHashMismatch {
                 package,
                 artifact,

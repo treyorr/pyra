@@ -8,6 +8,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use pyra_core::AppPaths;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use tokio::task::JoinSet;
 
 use crate::{
     ProjectError,
@@ -15,6 +16,9 @@ use crate::{
 };
 
 const STUB_STATE_ENV: &str = "PYRA_SYNC_INSTALLER_STATE_PATH";
+// Artifact downloads are network- and IO-bound, but the installer still keeps
+// a small cap here so preparation never turns into unbounded fan-out.
+const MAX_PARALLEL_ARTIFACT_PREPARATIONS: usize = 4;
 // Environment inspection is a read-only installer concern. Querying the
 // managed interpreter's stdlib metadata keeps that step independent from pip's
 // CLI health while still reflecting the interpreter's installed distributions.
@@ -54,6 +58,19 @@ pub struct ReconciliationPlan {
 pub struct ApplyReconciliationOutcome {
     pub installed: usize,
     pub removed: usize,
+}
+
+#[derive(Debug, Clone)]
+struct PendingArtifactPreparation {
+    action_index: usize,
+    package: LockPackage,
+    artifact: LockArtifact,
+}
+
+#[derive(Debug)]
+struct PreparedArtifact {
+    action_index: usize,
+    path: Utf8PathBuf,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -105,20 +122,16 @@ impl EnvironmentInstaller {
             );
         }
 
-        for action in &plan.actions {
+        // Artifact preparation can overlap, but the later apply loop still
+        // walks one deterministic reconciliation plan.
+        let prepared_artifacts = prepare_install_artifacts(paths, plan, packages).await?;
+
+        for (action_index, action) in plan.actions.iter().enumerate() {
             match action {
-                ReconciliationPlanAction::Install { name, version } => {
-                    let package = packages
-                        .iter()
-                        .find(|package| &package.name == name && &package.version == version)
-                        .expect("lock package for install action");
-                    let artifact = package
-                        .wheels
-                        .first()
-                        .or(package.sdist.as_ref())
-                        .expect("lock package should include an artifact");
-                    let verified_artifact =
-                        prepare_verified_artifact(paths, package, artifact).await?;
+                ReconciliationPlanAction::Install { name, version: _ } => {
+                    let verified_artifact = prepared_artifacts
+                        .get(&action_index)
+                        .expect("prepared artifact for install action");
                     let output = Command::new(interpreter.as_std_path())
                         .args(["-m", "pip", "install", "--no-deps"])
                         .arg(verified_artifact.as_std_path())
@@ -194,6 +207,9 @@ impl ReconciliationPlan {
         project_name: &str,
         build_system_present: bool,
     ) -> Self {
+        // Reconciliation planning is part of Pyra's stable sync model, so the
+        // desired package set is normalized into sorted maps before actions are
+        // emitted. That keeps apply order deterministic across runs.
         let desired = selected_packages
             .iter()
             .map(|package| (package.name.clone(), package.version.clone()))
@@ -257,6 +273,105 @@ fn parse_inspected_distributions(
             )
         })
         .collect())
+}
+
+async fn prepare_install_artifacts(
+    paths: &AppPaths,
+    plan: &ReconciliationPlan,
+    packages: &[LockPackage],
+) -> Result<BTreeMap<usize, Utf8PathBuf>, ProjectError> {
+    let pending = pending_artifact_preparations(plan, packages);
+    if pending.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+
+    let concurrency = pending.len().min(MAX_PARALLEL_ARTIFACT_PREPARATIONS).max(1);
+    let mut next_pending = pending.into_iter();
+    let mut join_set: JoinSet<Result<PreparedArtifact, ProjectError>> = JoinSet::new();
+
+    for _ in 0..concurrency {
+        if let Some(pending) = next_pending.next() {
+            spawn_artifact_preparation(&mut join_set, paths.clone(), pending);
+        }
+    }
+
+    let mut prepared = BTreeMap::new();
+    while let Some(result) = join_set.join_next().await {
+        let prepared_artifact = match result {
+            Ok(Ok(prepared_artifact)) => prepared_artifact,
+            Ok(Err(error)) => {
+                cancel_pending_preparations(&mut join_set).await;
+                return Err(error);
+            }
+            Err(error) => {
+                cancel_pending_preparations(&mut join_set).await;
+                return Err(ProjectError::ArtifactPreparationTask {
+                    detail: error.to_string(),
+                });
+            }
+        };
+        prepared.insert(prepared_artifact.action_index, prepared_artifact.path);
+
+        if let Some(pending) = next_pending.next() {
+            spawn_artifact_preparation(&mut join_set, paths.clone(), pending);
+        }
+    }
+
+    Ok(prepared)
+}
+
+fn pending_artifact_preparations(
+    plan: &ReconciliationPlan,
+    packages: &[LockPackage],
+) -> Vec<PendingArtifactPreparation> {
+    plan.actions
+        .iter()
+        .enumerate()
+        .filter_map(|(action_index, action)| match action {
+            ReconciliationPlanAction::Install { name, version } => {
+                let package = packages
+                    .iter()
+                    .find(|package| &package.name == name && &package.version == version)
+                    .expect("lock package for install action");
+                Some(PendingArtifactPreparation {
+                    action_index,
+                    package: package.clone(),
+                    artifact: selected_artifact(package).clone(),
+                })
+            }
+            ReconciliationPlanAction::Remove { .. } => None,
+        })
+        .collect()
+}
+
+fn selected_artifact(package: &LockPackage) -> &LockArtifact {
+    package
+        .wheels
+        .first()
+        .or(package.sdist.as_ref())
+        .expect("lock package should include an artifact")
+}
+
+fn spawn_artifact_preparation(
+    join_set: &mut JoinSet<Result<PreparedArtifact, ProjectError>>,
+    paths: AppPaths,
+    pending: PendingArtifactPreparation,
+) {
+    join_set.spawn(async move {
+        let prepared_path =
+            prepare_verified_artifact(&paths, &pending.package, &pending.artifact).await?;
+        Ok(PreparedArtifact {
+            action_index: pending.action_index,
+            path: prepared_path,
+        })
+    });
+}
+
+async fn cancel_pending_preparations(
+    join_set: &mut JoinSet<Result<PreparedArtifact, ProjectError>>,
+) {
+    join_set.abort_all();
+    while join_set.join_next().await.is_some() {}
 }
 
 fn read_stub_state(path: &str) -> Result<BTreeMap<String, String>, ProjectError> {
@@ -348,6 +463,9 @@ fn normalized_artifact_name(artifact: &LockArtifact) -> String {
 }
 
 async fn download_artifact_bytes(artifact: &LockArtifact) -> Result<Vec<u8>, ProjectError> {
+    #[cfg(test)]
+    test_support::before_download(&artifact.url).await?;
+
     if let Some(path) = artifact.url.strip_prefix("file://") {
         return fs::read(path).map_err(|source| ProjectError::ReadLockedArtifact {
             path: path.to_string(),
@@ -413,6 +531,171 @@ fn remove_file_if_exists(path: &Utf8Path) -> Result<(), ProjectError> {
     }
 }
 
+#[cfg(test)]
+mod test_support {
+    use std::collections::BTreeSet;
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Duration;
+
+    use tokio::time::sleep;
+
+    use crate::ProjectError;
+
+    #[derive(Debug, Default, Clone, Eq, PartialEq)]
+    pub(super) struct DownloadHookSnapshot {
+        pub max_in_flight: usize,
+        pub started_urls: Vec<String>,
+    }
+
+    #[derive(Debug, Default)]
+    struct DownloadHookState {
+        enabled: AtomicBool,
+        delay_ms: AtomicU64,
+        in_flight: AtomicUsize,
+        max_in_flight: AtomicUsize,
+        delayed_urls: Mutex<BTreeSet<String>>,
+        failed_urls: Mutex<BTreeSet<String>>,
+        started_urls: Mutex<Vec<String>>,
+    }
+
+    static DOWNLOAD_HOOK: OnceLock<DownloadHookState> = OnceLock::new();
+    static DOWNLOAD_HOOK_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn hook() -> &'static DownloadHookState {
+        DOWNLOAD_HOOK.get_or_init(DownloadHookState::default)
+    }
+
+    fn hook_lock() -> &'static Mutex<()> {
+        DOWNLOAD_HOOK_LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    pub(super) struct DownloadHookGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl Drop for DownloadHookGuard {
+        fn drop(&mut self) {
+            reset();
+        }
+    }
+
+    struct InFlightGuard<'a> {
+        hook: &'a DownloadHookState,
+    }
+
+    impl Drop for InFlightGuard<'_> {
+        fn drop(&mut self) {
+            self.hook.in_flight.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    pub(super) fn install_download_hook<I, J>(
+        delay_ms: u64,
+        delayed_urls: I,
+        failed_urls: J,
+    ) -> DownloadHookGuard
+    where
+        I: IntoIterator<Item = String>,
+        J: IntoIterator<Item = String>,
+    {
+        let lock = hook_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        reset();
+
+        let hook = hook();
+        hook.enabled.store(true, Ordering::SeqCst);
+        hook.delay_ms.store(delay_ms, Ordering::SeqCst);
+        *hook.delayed_urls.lock().expect("download hook urls") = delayed_urls.into_iter().collect();
+        *hook.failed_urls.lock().expect("download hook urls") = failed_urls.into_iter().collect();
+
+        DownloadHookGuard { _lock: lock }
+    }
+
+    pub(super) async fn before_download(url: &str) -> Result<(), ProjectError> {
+        let hook = hook();
+        if !hook.enabled.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        hook.started_urls
+            .lock()
+            .expect("download hook urls")
+            .push(url.to_string());
+
+        let current = hook.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        let _in_flight = InFlightGuard { hook };
+        update_max_in_flight(hook, current);
+
+        let delay_ms = hook.delay_ms.load(Ordering::SeqCst);
+        let (should_delay, should_fail) = {
+            let delayed_urls = hook.delayed_urls.lock().expect("download hook urls");
+            let failed_urls = hook.failed_urls.lock().expect("download hook urls");
+            (
+                delay_ms > 0 && (delayed_urls.is_empty() || delayed_urls.contains(url)),
+                failed_urls.contains(url),
+            )
+        };
+
+        if should_fail {
+            return Err(ProjectError::ReadLockedArtifact {
+                path: url.to_string(),
+                source: std::io::Error::other("test hook forced download failure"),
+            });
+        }
+
+        if should_delay {
+            sleep(Duration::from_millis(delay_ms)).await;
+        }
+
+        Ok(())
+    }
+
+    pub(super) fn snapshot() -> DownloadHookSnapshot {
+        let hook = hook();
+        DownloadHookSnapshot {
+            max_in_flight: hook.max_in_flight.load(Ordering::SeqCst),
+            started_urls: hook
+                .started_urls
+                .lock()
+                .expect("download hook urls")
+                .clone(),
+        }
+    }
+
+    fn update_max_in_flight(hook: &DownloadHookState, current: usize) {
+        let mut max = hook.max_in_flight.load(Ordering::SeqCst);
+        while current > max {
+            match hook.max_in_flight.compare_exchange(
+                max,
+                current,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => break,
+                Err(observed) => max = observed,
+            }
+        }
+    }
+
+    fn reset() {
+        let hook = hook();
+        hook.enabled.store(false, Ordering::SeqCst);
+        hook.delay_ms.store(0, Ordering::SeqCst);
+        hook.in_flight.store(0, Ordering::SeqCst);
+        hook.max_in_flight.store(0, Ordering::SeqCst);
+        hook.delayed_urls
+            .lock()
+            .expect("download hook urls")
+            .clear();
+        hook.failed_urls.lock().expect("download hook urls").clear();
+        hook.started_urls
+            .lock()
+            .expect("download hook urls")
+            .clear();
+    }
+}
+
 fn apply_stub_state(
     path: &str,
     project_name: &str,
@@ -473,8 +756,9 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        ReconciliationPlan, ReconciliationPlanAction, parse_inspected_distributions,
-        prepare_verified_artifact, sha256_hex,
+        MAX_PARALLEL_ARTIFACT_PREPARATIONS, ReconciliationPlan, ReconciliationPlanAction,
+        parse_inspected_distributions, prepare_install_artifacts, prepare_verified_artifact,
+        selected_artifact, sha256_hex, test_support,
     };
     use crate::ProjectError;
     use crate::sync::{LockArtifact, LockMarker, LockMarkerClause, LockPackage, LockSelection};
@@ -598,6 +882,195 @@ mod tests {
             } if interpreter == "/tmp/python"
                 && detail.contains("invalid importlib.metadata output")
         ));
+    }
+
+    #[tokio::test]
+    async fn prepares_artifacts_with_bounded_concurrency() {
+        let temp = tempdir().expect("temporary directory");
+        let paths = test_paths(temp.path());
+
+        let mut packages = Vec::new();
+        let mut delayed_urls = Vec::new();
+        let mut actions = Vec::new();
+
+        for index in 0..(MAX_PARALLEL_ARTIFACT_PREPARATIONS + 2) {
+            let name = format!("pkg-{index}");
+            let version = format!("1.0.{index}");
+            let source_path = temp
+                .path()
+                .join(format!("{name}-{version}-py3-none-any.whl"));
+            let bytes = format!("{name} fixture bytes").into_bytes();
+            fs::write(&source_path, &bytes).expect("artifact bytes");
+
+            let artifact = artifact(
+                source_path.as_path(),
+                sha256_hex(&bytes),
+                &format!("{name}-{version}-py3-none-any.whl"),
+            );
+            delayed_urls.push(artifact.url.clone());
+            packages.push(package_with_named_artifact(&name, &version, artifact));
+            actions.push(ReconciliationPlanAction::Install { name, version });
+        }
+
+        let _hook = test_support::install_download_hook(50, delayed_urls, Vec::new());
+        let prepared =
+            prepare_install_artifacts(&paths, &ReconciliationPlan { actions }, &packages)
+                .await
+                .expect("all artifacts should prepare successfully");
+        let snapshot = test_support::snapshot();
+
+        assert_eq!(
+            snapshot.max_in_flight, MAX_PARALLEL_ARTIFACT_PREPARATIONS,
+            "preparation should never exceed the installer concurrency bound"
+        );
+        assert_eq!(prepared.len(), packages.len());
+        assert_eq!(snapshot.started_urls.len(), packages.len());
+        assert!(staging_dir_entries(&paths).is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancels_parallel_preparation_after_first_failure() {
+        let temp = tempdir().expect("temporary directory");
+        let paths = test_paths(temp.path());
+        let failing_path = temp.path().join("failing-1.0.0.whl");
+        let failing_bytes = b"failing fixture bytes";
+        fs::write(&failing_path, failing_bytes).expect("artifact bytes");
+        let failing_artifact = artifact(
+            failing_path.as_path(),
+            sha256_hex(failing_bytes),
+            "failing-1.0.0.whl",
+        );
+
+        let mut packages = vec![package_with_named_artifact(
+            "failing",
+            "1.0.0",
+            failing_artifact.clone(),
+        )];
+        let mut actions = vec![ReconciliationPlanAction::Install {
+            name: "failing".to_string(),
+            version: "1.0.0".to_string(),
+        }];
+        let mut delayed_urls = Vec::new();
+
+        for index in 0..MAX_PARALLEL_ARTIFACT_PREPARATIONS {
+            let name = format!("slow-{index}");
+            let version = "2.0.0".to_string();
+            let source_path = temp
+                .path()
+                .join(format!("{name}-{version}-py3-none-any.whl"));
+            let bytes = format!("{name} fixture bytes").into_bytes();
+            fs::write(&source_path, &bytes).expect("artifact bytes");
+
+            let artifact = artifact(
+                source_path.as_path(),
+                sha256_hex(&bytes),
+                &format!("{name}-{version}-py3-none-any.whl"),
+            );
+            delayed_urls.push(artifact.url.clone());
+            packages.push(package_with_named_artifact(
+                &name,
+                &version,
+                artifact.clone(),
+            ));
+            actions.push(ReconciliationPlanAction::Install {
+                name: name.clone(),
+                version: version.clone(),
+            });
+        }
+
+        let never_started_name = "slow-never-started";
+        let never_started_version = "2.0.0";
+        let never_started_path = temp.path().join(format!(
+            "{never_started_name}-{never_started_version}-py3-none-any.whl"
+        ));
+        let never_started_bytes = b"never-started fixture bytes";
+        fs::write(&never_started_path, never_started_bytes).expect("artifact bytes");
+        let never_started_artifact = artifact(
+            never_started_path.as_path(),
+            sha256_hex(never_started_bytes),
+            &format!("{never_started_name}-{never_started_version}-py3-none-any.whl"),
+        );
+        let never_started_url = never_started_artifact.url.clone();
+        packages.push(package_with_named_artifact(
+            never_started_name,
+            never_started_version,
+            never_started_artifact.clone(),
+        ));
+        actions.push(ReconciliationPlanAction::Install {
+            name: never_started_name.to_string(),
+            version: never_started_version.to_string(),
+        });
+
+        let _hook =
+            test_support::install_download_hook(200, delayed_urls, [failing_artifact.url.clone()]);
+        let error = prepare_install_artifacts(&paths, &ReconciliationPlan { actions }, &packages)
+            .await
+            .expect_err("preparation should fail once the forced download failure is encountered");
+        let snapshot = test_support::snapshot();
+
+        assert!(matches!(
+            error,
+            ProjectError::ReadLockedArtifact { ref path, .. }
+                if path == &failing_artifact.url
+        ));
+        assert!(
+            snapshot.max_in_flight <= MAX_PARALLEL_ARTIFACT_PREPARATIONS,
+            "cancellation should never exceed the preparation bound"
+        );
+        assert!(
+            snapshot.max_in_flight >= 2,
+            "the test should observe overlapping preparation before cancellation"
+        );
+        assert!(
+            !snapshot
+                .started_urls
+                .iter()
+                .any(|url| url == &never_started_url),
+            "later install actions should not start once preparation fails"
+        );
+        for package in packages.iter().skip(1) {
+            let artifact = selected_artifact(package);
+            let cached_path = paths.package_artifact_cache_file(&artifact.sha256, &artifact.name);
+            assert!(
+                !cached_path.exists(),
+                "canceled preparation should not leave cached artifacts behind"
+            );
+        }
+        assert!(staging_dir_entries(&paths).is_empty());
+    }
+
+    #[test]
+    fn builds_deterministic_action_order() {
+        let selected = vec![
+            package("beta", "2.0.0", None),
+            package("alpha", "1.0.0", None),
+            package("gamma", "3.0.0", None),
+        ];
+        let installed = BTreeMap::from([
+            ("delta".to_string(), "4.0.0".to_string()),
+            ("beta".to_string(), "1.5.0".to_string()),
+            ("gamma".to_string(), "3.0.0".to_string()),
+        ]);
+        let protected = BTreeSet::new();
+
+        let plan = ReconciliationPlan::build(&selected, &installed, &protected, "example", false);
+
+        assert_eq!(
+            plan.actions,
+            vec![
+                ReconciliationPlanAction::Install {
+                    name: "alpha".to_string(),
+                    version: "1.0.0".to_string(),
+                },
+                ReconciliationPlanAction::Install {
+                    name: "beta".to_string(),
+                    version: "2.0.0".to_string(),
+                },
+                ReconciliationPlanAction::Remove {
+                    name: "delta".to_string(),
+                },
+            ]
+        );
     }
 
     #[tokio::test]
@@ -752,7 +1225,15 @@ mod tests {
     }
 
     fn package_with_artifact(name: &str, artifact: LockArtifact) -> LockPackage {
-        let mut package = package(name, "25.1.0", None);
+        package_with_named_artifact(name, "25.1.0", artifact)
+    }
+
+    fn package_with_named_artifact(
+        name: &str,
+        version: &str,
+        artifact: LockArtifact,
+    ) -> LockPackage {
+        let mut package = package(name, version, None);
         package.wheels = vec![artifact];
         package
     }
