@@ -128,10 +128,14 @@ pub enum ProjectError {
     },
     #[error("invalid dependency value in {context}")]
     InvalidRequirementValue { context: String },
+    #[error("dependency declarations in {context} must be an array of requirement strings")]
+    InvalidDependencyDeclarationType { context: String },
     #[error("unknown dependency group `{name}`")]
     UnknownDependencyGroup { name: String },
     #[error("unknown optional dependency `{name}`")]
     UnknownOptionalDependency { name: String },
+    #[error("dependency `{dependency}` is not declared in {scope}")]
+    MissingDependencyDeclaration { scope: String, dependency: String },
     #[error("the pinned Python selector does not match an installed managed interpreter")]
     PinnedPythonNotInstalled {
         selector: String,
@@ -453,6 +457,12 @@ impl UserFacingError for ProjectError {
             )
             .with_detail("Project dependencies, optional dependencies, and dependency groups must contain PEP 508 requirement strings.")
             .with_suggestion("Replace the invalid value with a requirement string and retry."),
+            Self::InvalidDependencyDeclarationType { context } => ErrorReport::new(
+                ErrorKind::User,
+                format!("Dependency declarations in {context} are not valid."),
+            )
+            .with_detail("Pyra expected an array of PEP 508 requirement strings so it could update the selected declaration scope safely.")
+            .with_suggestion("Rewrite the declaration as an array of requirement strings and retry."),
             Self::UnknownDependencyGroup { name } => ErrorReport::new(
                 ErrorKind::User,
                 format!("Dependency group `{name}` is not defined for this project."),
@@ -465,6 +475,12 @@ impl UserFacingError for ProjectError {
             )
             .with_detail("The requested sync selection referenced an extra that does not exist under `[project.optional-dependencies]`.")
             .with_suggestion("Check the extra name in `pyproject.toml` and retry."),
+            Self::MissingDependencyDeclaration { scope, dependency } => ErrorReport::new(
+                ErrorKind::User,
+                format!("Dependency `{dependency}` is not declared in {scope}."),
+            )
+            .with_detail("Pyra only removes dependencies that are already declared in the selected manifest scope.")
+            .with_suggestion("Check the selected scope and dependency name, then retry."),
             Self::PinnedPythonNotInstalled { selector, source } => ErrorReport::new(
                 ErrorKind::User,
                 "Pyra could not find the pinned managed Python interpreter.",

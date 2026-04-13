@@ -9,6 +9,10 @@ mod sync;
 pub use environment::{ProjectEnvironmentRecord, ProjectPythonSelection};
 pub use error::ProjectError;
 pub use init::InitProjectOutcome;
+pub use pyproject::{
+    DependencyDeclarationScope, PyprojectMutationOutcome, add_dependency_requirement,
+    remove_dependency_requirement,
+};
 pub use service::{
     InitProjectRequest, InitProjectWithPythonOutcome, ProjectService, UseProjectPythonOutcome,
     UseProjectPythonRequest,
