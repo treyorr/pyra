@@ -22,6 +22,8 @@ pub enum Command {
     Init(InitArgs),
     /// Pin a managed Python version for the current project.
     Use(UseArgs),
+    /// Add a dependency declaration to `pyproject.toml` and sync the project.
+    Add(AddArgs),
     /// Reconcile the centralized environment from `pyproject.toml` and `pylock.toml`.
     Sync(SyncArgs),
 }
@@ -73,6 +75,18 @@ pub struct InitArgs {
 pub struct UseArgs {
     /// Python version request like 3, 3.13, or 3.13.2.
     pub version: String,
+}
+
+#[derive(Debug, Args)]
+pub struct AddArgs {
+    /// PEP 508 requirement like `rich>=13` or `httpx[socks]==0.27.0`.
+    pub requirement: String,
+    /// Add the dependency to a named dependency group.
+    #[arg(long, conflicts_with = "extra")]
+    pub group: Option<String>,
+    /// Add the dependency to a named optional dependency / extra.
+    #[arg(long, conflicts_with = "group")]
+    pub extra: Option<String>,
 }
 
 #[derive(Debug, Args)]

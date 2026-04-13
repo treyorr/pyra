@@ -4,8 +4,11 @@
 //! environment preparation while leaving Python release resolution to the
 //! dedicated Python subsystem.
 
+use std::str::FromStr;
+
 use camino::Utf8PathBuf;
 use pep508_rs::MarkerEnvironmentBuilder;
+use pep508_rs::Requirement;
 use pyra_core::AppContext;
 use pyra_python::{InstalledPythonRecord, PythonVersionRequest};
 use pyra_resolver::Resolver;
@@ -20,7 +23,10 @@ use crate::{
     environment::{ProjectEnvironmentRecord, ProjectEnvironmentStore, ProjectPythonSelection},
     identity::{ProjectIdentity, find_project_root},
     init::{InitProjectOutcome, create_initial_layout, validate_initial_layout},
-    pyproject::{read_python_selector, update_python_selector},
+    pyproject::{
+        DependencyDeclarationScope, add_dependency_requirement, read_python_selector,
+        update_python_selector,
+    },
     sync::{
         CURRENT_RESOLUTION_STRATEGY, EnvironmentInstaller, LockArtifact, LockDependencyRef,
         LockFile, LockFreshness, LockMarker, LockMarkerClause, LockPackage, LockSelection,
@@ -40,6 +46,22 @@ pub struct UseProjectPythonOutcome {
     pub project_id: String,
     pub pyproject_path: Utf8PathBuf,
     pub environment: ProjectEnvironmentRecord,
+}
+
+/// Request to add one declared dependency before reusing the normal sync flow.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct AddProjectRequest {
+    pub requirement: String,
+    pub scope: DependencyDeclarationScope,
+}
+
+/// Outcome for `pyra add`, including whether the manifest changed before sync.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct AddProjectOutcome {
+    pub requirement: String,
+    pub scope: DependencyDeclarationScope,
+    pub manifest_updated: bool,
+    pub sync: SyncProjectOutcome,
 }
 
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
@@ -134,6 +156,31 @@ impl ProjectService {
             project_id: identity.id,
             pyproject_path,
             environment,
+        })
+    }
+
+    pub async fn add(
+        self,
+        context: &AppContext,
+        request: AddProjectRequest,
+    ) -> Result<AddProjectOutcome, ProjectError> {
+        let project_root = find_project_root(&context.cwd)?;
+        let pyproject_path = project_root.join("pyproject.toml");
+        let requirement = Requirement::from_str(&request.requirement).map_err(|source| {
+            ProjectError::InvalidRequirement {
+                context: "`pyra add` input".to_string(),
+                value: request.requirement.clone(),
+                detail: source.to_string(),
+            }
+        })?;
+        let mutation = add_dependency_requirement(&pyproject_path, &request.scope, &requirement)?;
+        let sync = self.sync(context, SyncProjectRequest::default()).await?;
+
+        Ok(AddProjectOutcome {
+            requirement: requirement.to_string(),
+            scope: request.scope,
+            manifest_updated: mutation.changed,
+            sync,
         })
     }
 

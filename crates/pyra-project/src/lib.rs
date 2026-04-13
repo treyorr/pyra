@@ -14,8 +14,8 @@ pub use pyproject::{
     remove_dependency_requirement,
 };
 pub use service::{
-    InitProjectRequest, InitProjectWithPythonOutcome, ProjectService, UseProjectPythonOutcome,
-    UseProjectPythonRequest,
+    AddProjectOutcome, AddProjectRequest, InitProjectRequest, InitProjectWithPythonOutcome,
+    ProjectService, UseProjectPythonOutcome, UseProjectPythonRequest,
 };
 pub use service::{SyncLockMode, SyncProjectOutcome, SyncProjectRequest};
 pub use sync::SyncSelectionRequest;

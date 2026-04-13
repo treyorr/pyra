@@ -721,6 +721,230 @@ python = "3.13.12"
         .stderr(contains("include cycle"));
 }
 
+#[test]
+fn add_updates_base_dependencies_in_pyproject() {
+    let home = temp_env_root();
+    let index = start_fixture_index();
+    let project_root = home.path().join("workspace").join("sample-add-base");
+    fs::create_dir_all(&project_root).expect("project root");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        r#"[project]
+name = "sample-add-base"
+version = "0.1.0"
+requires-python = "==3.13.*"
+dependencies = ["attrs==25.1.0"]
+
+[tool.pyra]
+python = "3.13.12"
+"#,
+    )
+    .expect("pyproject");
+
+    seed_managed_install(&home, "3.13.12").expect("managed install");
+    let state_path = home.path().join("installer-state.json");
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .env("PYRA_INDEX_URL", &index.base_url)
+        .args(["add", "httpx==0.27.0"])
+        .assert()
+        .success()
+        .stdout(contains("Added `httpx==0.27.0`"));
+
+    let pyproject = fs::read_to_string(project_root.join("pyproject.toml")).expect("pyproject");
+    assert!(pyproject.contains("dependencies = [\"attrs==25.1.0\", \"httpx==0.27.0\"]"));
+}
+
+#[test]
+fn add_updates_dependency_group_in_pyproject() {
+    let home = temp_env_root();
+    let index = start_fixture_index();
+    let project_root = home.path().join("workspace").join("sample-add-group");
+    fs::create_dir_all(&project_root).expect("project root");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        r#"[project]
+name = "sample-add-group"
+version = "0.1.0"
+requires-python = "==3.13.*"
+dependencies = []
+
+[tool.pyra]
+python = "3.13.12"
+"#,
+    )
+    .expect("pyproject");
+
+    seed_managed_install(&home, "3.13.12").expect("managed install");
+    let state_path = home.path().join("installer-state.json");
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .env("PYRA_INDEX_URL", &index.base_url)
+        .args(["add", "pytest==8.3.0", "--group", "dev"])
+        .assert()
+        .success()
+        .stdout(contains("dependency group `dev`"));
+
+    let pyproject = fs::read_to_string(project_root.join("pyproject.toml")).expect("pyproject");
+    assert!(pyproject.contains("[dependency-groups]"));
+    assert!(pyproject.contains("dev = [\"pytest==8.3.0\"]"));
+
+    let state = read_state(&state_path);
+    assert_eq!(state.get("pytest"), Some(&"8.3.0".to_string()));
+    assert_eq!(state.get("pluggy"), Some(&"1.5.0".to_string()));
+}
+
+#[test]
+fn add_updates_extra_in_pyproject() {
+    let home = temp_env_root();
+    let index = start_fixture_index();
+    let project_root = home.path().join("workspace").join("sample-add-extra");
+    fs::create_dir_all(&project_root).expect("project root");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        r#"[project]
+name = "sample-add-extra"
+version = "0.1.0"
+requires-python = "==3.13.*"
+dependencies = []
+
+[tool.pyra]
+python = "3.13.12"
+"#,
+    )
+    .expect("pyproject");
+
+    seed_managed_install(&home, "3.13.12").expect("managed install");
+    let state_path = home.path().join("installer-state.json");
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .env("PYRA_INDEX_URL", &index.base_url)
+        .args(["add", "httpx==0.27.0", "--extra", "cli-tools"])
+        .assert()
+        .success()
+        .stdout(contains("extra `cli-tools`"));
+
+    let pyproject = fs::read_to_string(project_root.join("pyproject.toml")).expect("pyproject");
+    assert!(pyproject.contains("[project.optional-dependencies]"));
+    assert!(pyproject.contains("cli-tools = [\"httpx==0.27.0\"]"));
+
+    let lock = fs::read_to_string(project_root.join("pylock.toml")).expect("pylock");
+    assert!(lock.contains("extras = [\"cli-tools\"]"));
+    assert!(lock.contains("name = \"httpx\""));
+
+    let state = read_state(&state_path);
+    assert!(!state.contains_key("httpx"));
+}
+
+#[test]
+fn add_does_not_duplicate_existing_requirement() {
+    let home = temp_env_root();
+    let index = start_fixture_index();
+    let project_root = home.path().join("workspace").join("sample-add-existing");
+    fs::create_dir_all(&project_root).expect("project root");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        r#"[project]
+name = "sample-add-existing"
+version = "0.1.0"
+requires-python = "==3.13.*"
+dependencies = ["attrs==25.1.0"]
+
+[tool.pyra]
+python = "3.13.12"
+"#,
+    )
+    .expect("pyproject");
+
+    seed_managed_install(&home, "3.13.12").expect("managed install");
+    let state_path = home.path().join("installer-state.json");
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .env("PYRA_INDEX_URL", &index.base_url)
+        .args(["add", "attrs==25.1.0"])
+        .assert()
+        .success()
+        .stdout(contains("already declared"));
+
+    let pyproject = fs::read_to_string(project_root.join("pyproject.toml")).expect("pyproject");
+    assert_eq!(pyproject.matches("attrs==25.1.0").count(), 1);
+    assert!(project_root.join("pylock.toml").exists());
+
+    let state = read_state(&state_path);
+    assert_eq!(state.get("attrs"), Some(&"25.1.0".to_string()));
+}
+
+#[test]
+fn add_rejects_invalid_requirement_before_mutation() {
+    let home = temp_env_root();
+    let project_root = home.path().join("workspace").join("sample-add-invalid");
+    fs::create_dir_all(&project_root).expect("project root");
+    let original_pyproject = r#"[project]
+name = "sample-add-invalid"
+version = "0.1.0"
+dependencies = []
+"#;
+    fs::write(project_root.join("pyproject.toml"), original_pyproject).expect("pyproject");
+    let state_path = home.path().join("installer-state.json");
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .args(["add", "not a valid requirement"])
+        .assert()
+        .failure()
+        .stderr(contains("could not parse"))
+        .stderr(contains("PEP 508"));
+
+    let pyproject = fs::read_to_string(project_root.join("pyproject.toml")).expect("pyproject");
+    assert_eq!(pyproject, original_pyproject);
+    assert!(!project_root.join("pylock.toml").exists());
+}
+
+#[test]
+fn add_updates_lockfile_and_environment_after_mutation() {
+    let home = temp_env_root();
+    let index = start_fixture_index();
+    let project_root = home.path().join("workspace").join("sample-add-sync");
+    fs::create_dir_all(&project_root).expect("project root");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        r#"[project]
+name = "sample-add-sync"
+version = "0.1.0"
+requires-python = "==3.13.*"
+dependencies = ["attrs==25.1.0"]
+
+[tool.pyra]
+python = "3.13.12"
+"#,
+    )
+    .expect("pyproject");
+
+    seed_managed_install(&home, "3.13.12").expect("managed install");
+    let state_path = home.path().join("installer-state.json");
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .env("PYRA_INDEX_URL", &index.base_url)
+        .args(["add", "httpx==0.27.0"])
+        .assert()
+        .success()
+        .stdout(contains("reconciled the centralized environment"));
+
+    let lock = fs::read_to_string(project_root.join("pylock.toml")).expect("pylock");
+    assert!(lock.contains("name = \"httpx\""));
+    assert!(lock.contains("name = \"anyio\""));
+
+    let state = read_state(&state_path);
+    assert_eq!(state.get("attrs"), Some(&"25.1.0".to_string()));
+    assert_eq!(state.get("httpx"), Some(&"0.27.0".to_string()));
+    assert_eq!(state.get("anyio"), Some(&"4.4.0".to_string()));
+}
+
 fn base_command(home: &TempDir, state_path: &Path) -> Command {
     let mut command = Command::cargo_bin("pyra").expect("pyra binary");
     command
