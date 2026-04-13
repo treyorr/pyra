@@ -13,5 +13,5 @@ pub use service::{
     InitProjectRequest, InitProjectWithPythonOutcome, ProjectService, UseProjectPythonOutcome,
     UseProjectPythonRequest,
 };
-pub use service::{SyncProjectOutcome, SyncProjectRequest};
+pub use service::{SyncLockMode, SyncProjectOutcome, SyncProjectRequest};
 pub use sync::SyncSelectionRequest;

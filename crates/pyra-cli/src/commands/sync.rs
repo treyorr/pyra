@@ -1,15 +1,23 @@
 use pyra_core::AppContext;
-use pyra_project::{ProjectService, SyncProjectRequest, SyncSelectionRequest};
+use pyra_project::{ProjectService, SyncLockMode, SyncProjectRequest, SyncSelectionRequest};
 use pyra_ui::{Block, Message, Output};
 
 use crate::cli::SyncArgs;
 use crate::commands::CommandError;
 
 pub async fn execute(args: SyncArgs, context: &AppContext) -> Result<Output, CommandError> {
+    let lock_mode = if args.locked {
+        SyncLockMode::Locked
+    } else if args.frozen {
+        SyncLockMode::Frozen
+    } else {
+        SyncLockMode::WriteIfNeeded
+    };
     let outcome = ProjectService
         .sync(
             context,
             SyncProjectRequest {
+                lock_mode,
                 selection: SyncSelectionRequest {
                     groups: args.groups,
                     extras: args.extras,

@@ -39,6 +39,25 @@ resolution when that selected interpreter falls outside the declared range.
 Freshness does not mean "latest available upstream". A lock stays fresh until
 relevant project or resolution inputs change.
 
+## Reproducibility Modes
+
+`pyra sync` supports three lock-handling modes:
+
+- default `pyra sync`
+- `pyra sync --locked`
+- `pyra sync --frozen`
+
+Default `sync` resolves when `pylock.toml` is missing or stale, then writes the
+updated lock before reconciling the centralized environment.
+
+`sync --locked` requires an existing fresh `pylock.toml`. It never resolves and
+never rewrites the lock. If the lock is missing or stale for the current
+inputs, sync fails instead of updating it.
+
+`sync --frozen` requires an existing `pylock.toml`. It never resolves and never
+rewrites the lock, even when the current project inputs would make that lock
+stale. Installation still applies from the recorded lock contents.
+
 ## Resolution Scope
 
 The current resolver computes one union resolution for:

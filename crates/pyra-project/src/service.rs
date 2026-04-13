@@ -45,6 +45,18 @@ pub struct UseProjectPythonOutcome {
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
 pub struct SyncProjectRequest {
     pub selection: SyncSelectionRequest,
+    pub lock_mode: SyncLockMode,
+}
+
+/// `pyra sync` supports one normal mode plus two CI-oriented lock-discipline
+/// modes. Keeping the policy typed here prevents clap booleans from leaking
+/// into project-domain logic.
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub enum SyncLockMode {
+    #[default]
+    WriteIfNeeded,
+    Locked,
+    Frozen,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -168,19 +180,50 @@ impl ProjectService {
         let index_url = std::env::var("PYRA_INDEX_URL")
             .unwrap_or_else(|_| "https://pypi.org/simple".to_string());
         let freshness = lock_freshness(&input, &resolver_environment, &index_url);
-        let (lock, lock_refreshed) = if input.pylock_path.exists() {
-            let lock = LockFile::read(&input.pylock_path)?;
-            if lock.is_fresh(&freshness) {
-                (lock, false)
-            } else {
-                let lock = resolve_lock(&input, &resolver_environment, &freshness).await?;
-                lock.write()?;
-                (lock, true)
+        let (lock, lock_refreshed) = match request.lock_mode {
+            SyncLockMode::WriteIfNeeded => {
+                if input.pylock_path.exists() {
+                    let lock = LockFile::read(&input.pylock_path)?;
+                    if lock.is_fresh(&freshness) {
+                        (lock, false)
+                    } else {
+                        let lock = resolve_lock(&input, &resolver_environment, &freshness).await?;
+                        lock.write()?;
+                        (lock, true)
+                    }
+                } else {
+                    let lock = resolve_lock(&input, &resolver_environment, &freshness).await?;
+                    lock.write()?;
+                    (lock, true)
+                }
             }
-        } else {
-            let lock = resolve_lock(&input, &resolver_environment, &freshness).await?;
-            lock.write()?;
-            (lock, true)
+            SyncLockMode::Locked => {
+                if !input.pylock_path.exists() {
+                    return Err(ProjectError::MissingLockfileForLockedSync {
+                        path: input.pylock_path.to_string(),
+                    });
+                }
+
+                let lock = LockFile::read(&input.pylock_path)?;
+                if !lock.is_fresh(&freshness) {
+                    return Err(ProjectError::StaleLockfileForLockedSync {
+                        path: input.pylock_path.to_string(),
+                    });
+                }
+
+                (lock, false)
+            }
+            SyncLockMode::Frozen => {
+                if !input.pylock_path.exists() {
+                    return Err(ProjectError::MissingLockfileForFrozenSync {
+                        path: input.pylock_path.to_string(),
+                    });
+                }
+
+                // `--frozen` intentionally trusts the existing lock as the
+                // install source even when freshness inputs have changed.
+                (LockFile::read(&input.pylock_path)?, false)
+            }
         };
 
         let mut selected_groups = selection.groups.clone();
@@ -493,7 +536,7 @@ mod tests {
     use pyra_errors::UserFacingError;
     use pyra_python::{ArchiveFormat, HostTarget, InstalledPythonRecord, PythonVersion};
 
-    use super::{ProjectService, SyncProjectRequest};
+    use super::{ProjectService, SyncLockMode, SyncProjectRequest};
     use crate::ProjectError;
 
     #[test]
@@ -580,6 +623,46 @@ python = "3.13.12"
         assert!(report.summary.contains("3.13.12"));
         assert!(report.summary.contains("<3.13"));
         assert!(!context.paths.project_environments_dir().exists());
+    }
+
+    #[tokio::test]
+    async fn sync_locked_requires_existing_lock_before_resolution() {
+        let _guard = installer_state_lock().lock().expect("installer state lock");
+        let temp_dir = tempfile::tempdir().expect("temporary directory");
+        let root = Utf8PathBuf::from_path_buf(temp_dir.path().join("workspace").join("sample"))
+            .expect("utf-8 project root");
+        fs::create_dir_all(&root).expect("project root");
+        let context = context_for_project(temp_dir.path(), &root);
+        let _stub_state = stub_installer_state(&root.join("installer-state.json"));
+        write_pyproject(
+            &root.join("pyproject.toml"),
+            r#"[project]
+name = "sample"
+version = "0.1.0"
+dependencies = []
+
+[tool.pyra]
+python = "3.13.12"
+"#,
+        );
+        seed_managed_install(&context, "3.13.12").expect("managed install");
+
+        let error = ProjectService
+            .sync(
+                &context,
+                SyncProjectRequest {
+                    lock_mode: SyncLockMode::Locked,
+                    ..SyncProjectRequest::default()
+                },
+            )
+            .await
+            .expect_err("missing lock should fail");
+
+        assert!(matches!(
+            error,
+            ProjectError::MissingLockfileForLockedSync { .. }
+        ));
+        assert!(!root.join("pylock.toml").exists());
     }
 
     fn installer_state_lock() -> &'static Mutex<()> {

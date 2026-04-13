@@ -296,6 +296,232 @@ python = "3.13.12"
 }
 
 #[test]
+fn sync_locked_fails_when_lock_is_missing() {
+    let home = temp_env_root();
+    let project_root = home
+        .path()
+        .join("workspace")
+        .join("sample-sync-locked-missing");
+    fs::create_dir_all(&project_root).expect("project root");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        r#"[project]
+name = "sample-sync-locked-missing"
+version = "0.1.0"
+requires-python = "==3.13.*"
+dependencies = ["attrs==25.1.0"]
+
+[tool.pyra]
+python = "3.13.12"
+"#,
+    )
+    .expect("pyproject");
+
+    seed_managed_install(&home, "3.13.12").expect("managed install");
+    let state_path = home.path().join("installer-state.json");
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .args(["sync", "--locked"])
+        .assert()
+        .failure()
+        .stderr(contains("sync --locked"))
+        .stderr(contains("pylock.toml"));
+
+    assert!(!project_root.join("pylock.toml").exists());
+}
+
+#[test]
+fn sync_locked_fails_when_lock_is_stale() {
+    let home = temp_env_root();
+    let index = start_fixture_index();
+    let project_root = home
+        .path()
+        .join("workspace")
+        .join("sample-sync-locked-stale");
+    fs::create_dir_all(&project_root).expect("project root");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        r#"[project]
+name = "sample-sync-locked-stale"
+version = "0.1.0"
+requires-python = "==3.13.*"
+dependencies = ["attrs==25.1.0"]
+
+[tool.pyra]
+python = "3.13.12"
+"#,
+    )
+    .expect("pyproject");
+
+    seed_managed_install(&home, "3.13.12").expect("managed install");
+    let state_path = home.path().join("installer-state.json");
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .env("PYRA_INDEX_URL", &index.base_url)
+        .args(["sync"])
+        .assert()
+        .success();
+
+    let lock_path = project_root.join("pylock.toml");
+    let original_lock = fs::read_to_string(&lock_path).expect("pylock");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        r#"[project]
+name = "sample-sync-locked-stale"
+version = "0.1.0"
+requires-python = "==3.13.*"
+dependencies = ["attrs==25.1.0", "httpx==0.27.0"]
+
+[tool.pyra]
+python = "3.13.12"
+"#,
+    )
+    .expect("updated pyproject");
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .env("PYRA_INDEX_URL", &index.base_url)
+        .args(["sync", "--locked"])
+        .assert()
+        .failure()
+        .stderr(contains("stale"))
+        .stderr(contains("sync --locked"));
+
+    let current_lock = fs::read_to_string(&lock_path).expect("pylock");
+    assert_eq!(original_lock, current_lock);
+    let state = read_state(&state_path);
+    assert_eq!(state.get("attrs"), Some(&"25.1.0".to_string()));
+    assert!(!state.contains_key("httpx"));
+}
+
+#[test]
+fn sync_locked_reuses_fresh_lock() {
+    let home = temp_env_root();
+    let index = start_fixture_index();
+    let project_root = home
+        .path()
+        .join("workspace")
+        .join("sample-sync-locked-fresh");
+    fs::create_dir_all(&project_root).expect("project root");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        r#"[project]
+name = "sample-sync-locked-fresh"
+version = "0.1.0"
+requires-python = "==3.13.*"
+dependencies = ["attrs==25.1.0"]
+
+[tool.pyra]
+python = "3.13.12"
+"#,
+    )
+    .expect("pyproject");
+
+    seed_managed_install(&home, "3.13.12").expect("managed install");
+    let state_path = home.path().join("installer-state.json");
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .env("PYRA_INDEX_URL", &index.base_url)
+        .args(["sync"])
+        .assert()
+        .success();
+
+    let first_lock = fs::read_to_string(project_root.join("pylock.toml")).expect("pylock");
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .env("PYRA_INDEX_URL", &index.base_url)
+        .args(["sync", "--locked"])
+        .assert()
+        .success()
+        .stdout(contains("Reused the current lock"));
+
+    let second_lock = fs::read_to_string(project_root.join("pylock.toml")).expect("pylock");
+    assert_eq!(first_lock, second_lock);
+}
+
+#[test]
+fn sync_frozen_uses_stale_lock_without_rewrite() {
+    let home = temp_env_root();
+    let index = start_fixture_index();
+    let project_root = home
+        .path()
+        .join("workspace")
+        .join("sample-sync-frozen-stale");
+    fs::create_dir_all(&project_root).expect("project root");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        r#"[project]
+name = "sample-sync-frozen-stale"
+version = "0.1.0"
+requires-python = "==3.13.*"
+dependencies = ["attrs==25.1.0"]
+
+[tool.pyra]
+python = "3.13.12"
+"#,
+    )
+    .expect("pyproject");
+
+    seed_managed_install(&home, "3.13.12").expect("managed install");
+    let state_path = home.path().join("installer-state.json");
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .env("PYRA_INDEX_URL", &index.base_url)
+        .args(["sync"])
+        .assert()
+        .success();
+
+    let lock_path = project_root.join("pylock.toml");
+    let original_lock = fs::read_to_string(&lock_path).expect("pylock");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        r#"[project]
+name = "sample-sync-frozen-stale"
+version = "0.1.0"
+requires-python = "==3.13.*"
+dependencies = ["attrs==25.1.0", "httpx==0.27.0"]
+
+[tool.pyra]
+python = "3.13.12"
+"#,
+    )
+    .expect("updated pyproject");
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .env("PYRA_INDEX_URL", &index.base_url)
+        .args(["sync", "--frozen"])
+        .assert()
+        .success()
+        .stdout(contains("Reused the current lock"));
+
+    let current_lock = fs::read_to_string(&lock_path).expect("pylock");
+    assert_eq!(original_lock, current_lock);
+    let state = read_state(&state_path);
+    assert_eq!(state.get("attrs"), Some(&"25.1.0".to_string()));
+    assert!(!state.contains_key("httpx"));
+    assert!(!state.contains_key("anyio"));
+}
+
+#[test]
+fn sync_rejects_locked_and_frozen_together() {
+    let home = temp_env_root();
+    let state_path = home.path().join("installer-state.json");
+
+    base_command(&home, &state_path)
+        .args(["sync", "--locked", "--frozen"])
+        .assert()
+        .failure()
+        .stderr(contains("--locked"))
+        .stderr(contains("--frozen"));
+}
+
+#[test]
 fn sync_regenerates_stale_lock_when_resolution_strategy_changes() {
     let home = temp_env_root();
     let index = start_fixture_index();

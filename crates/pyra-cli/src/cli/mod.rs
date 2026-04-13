@@ -77,6 +77,12 @@ pub struct UseArgs {
 
 #[derive(Debug, Args)]
 pub struct SyncArgs {
+    /// Require an existing fresh lock file and never regenerate it.
+    #[arg(long, conflicts_with = "frozen")]
+    pub locked: bool,
+    /// Require an existing lock file and use it without rewriting.
+    #[arg(long, conflicts_with = "locked")]
+    pub frozen: bool,
     /// Include a dependency group in addition to the defaults.
     #[arg(long = "group")]
     pub groups: Vec<String>,

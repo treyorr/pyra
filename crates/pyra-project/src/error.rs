@@ -138,6 +138,12 @@ pub enum ProjectError {
         #[source]
         source: PythonError,
     },
+    #[error("`sync --locked` requires an existing lock file at {path}")]
+    MissingLockfileForLockedSync { path: String },
+    #[error("`sync --locked` requires a fresh lock file at {path}")]
+    StaleLockfileForLockedSync { path: String },
+    #[error("`sync --frozen` requires an existing lock file at {path}")]
+    MissingLockfileForFrozenSync { path: String },
     #[error("failed to read pylock.toml at {path}")]
     ReadLockfile {
         path: String,
@@ -466,6 +472,27 @@ impl UserFacingError for ProjectError {
             .with_detail("`pyra sync` only installs into a Pyra-managed interpreter selected for this project.")
             .with_suggestion(format!("Install the pinned interpreter with `pyra python install {selector}` or repin the project with `pyra use`."))
             .with_verbose_detail(source.to_string()),
+            Self::MissingLockfileForLockedSync { path } => ErrorReport::new(
+                ErrorKind::User,
+                "Pyra could not run `sync --locked` because `pylock.toml` is missing.",
+            )
+            .with_detail("`--locked` only reuses an existing fresh lock file and never resolves new dependency state.")
+            .with_suggestion("Run `pyra sync` first to generate `pylock.toml`, then rerun `pyra sync --locked`.")
+            .with_verbose_detail(path.clone()),
+            Self::StaleLockfileForLockedSync { path } => ErrorReport::new(
+                ErrorKind::User,
+                "`pylock.toml` is stale, so `pyra sync --locked` stopped.",
+            )
+            .with_detail("The current project or resolution inputs no longer match the recorded lock freshness data, and `--locked` never regenerates the lock.")
+            .with_suggestion("Run `pyra sync` to refresh `pylock.toml`, then rerun `pyra sync --locked`.")
+            .with_verbose_detail(path.clone()),
+            Self::MissingLockfileForFrozenSync { path } => ErrorReport::new(
+                ErrorKind::User,
+                "Pyra could not run `sync --frozen` because `pylock.toml` is missing.",
+            )
+            .with_detail("`--frozen` installs strictly from an existing lock file and never resolves or rewrites it.")
+            .with_suggestion("Run `pyra sync` first to generate `pylock.toml`, then rerun `pyra sync --frozen`.")
+            .with_verbose_detail(path.clone()),
             Self::ReadLockfile { path, source } => ErrorReport::new(
                 ErrorKind::System,
                 format!("Pyra could not read `{path}`."),
