@@ -40,7 +40,10 @@ pub async fn main_entry() -> ExitCode {
     let mut terminal = Terminal::new(verbosity);
 
     match run(cli, verbosity, &mut terminal).await {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(0) => ExitCode::SUCCESS,
+        Ok(code) => u8::try_from(code)
+            .map(ExitCode::from)
+            .unwrap_or(ExitCode::from(1)),
         Err(error) => {
             let _ = terminal.render_error(&error);
             ExitCode::from(1)
@@ -48,21 +51,21 @@ pub async fn main_entry() -> ExitCode {
     }
 }
 
-async fn run(cli: Cli, verbosity: Verbosity, terminal: &mut Terminal) -> Result<(), AppError> {
+async fn run(cli: Cli, verbosity: Verbosity, terminal: &mut Terminal) -> Result<i32, AppError> {
     // The shared app context is the one place where we resolve runtime paths and
     // runtime-wide settings before handing control to feature-specific handlers.
     let context = AppContext::discover(verbosity)?;
     context.paths.ensure_base_layout()?;
 
-    let output = commands::execute(cli.command, &context).await?;
+    let result = commands::execute(cli.command, &context).await?;
     // Rendering happens only after command execution has returned a presentation
     // model, which keeps terminal concerns out of domain and orchestration code.
     terminal
-        .render(&output)
+        .render(&result.output)
         .map_err(|source| CoreError::CreateDirectory {
             path: "stdout".to_string(),
             source,
         })?;
 
-    Ok(())
+    Ok(result.exit_code)
 }

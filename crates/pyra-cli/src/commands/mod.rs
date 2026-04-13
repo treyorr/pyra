@@ -3,6 +3,7 @@ mod init;
 mod project_python;
 mod python;
 mod remove;
+mod run;
 mod sync;
 mod use_python;
 
@@ -13,7 +14,7 @@ use pyra_python::PythonError;
 use pyra_ui::Output;
 use thiserror::Error;
 
-use crate::cli::{AddArgs, Command, InitArgs, PythonArgs, RemoveArgs, SyncArgs, UseArgs};
+use crate::cli::{AddArgs, Command, InitArgs, PythonArgs, RemoveArgs, RunArgs, SyncArgs, UseArgs};
 
 #[derive(Debug, Error)]
 pub enum CommandError {
@@ -32,14 +33,49 @@ impl UserFacingError for CommandError {
     }
 }
 
-pub async fn execute(command: Command, context: &AppContext) -> Result<Output, CommandError> {
+#[derive(Debug)]
+pub struct CommandExecution {
+    pub output: Output,
+    pub exit_code: i32,
+}
+
+impl CommandExecution {
+    fn success(output: Output) -> Self {
+        Self {
+            output,
+            exit_code: 0,
+        }
+    }
+
+    pub fn with_exit_code(output: Output, exit_code: i32) -> Self {
+        Self { output, exit_code }
+    }
+}
+
+pub async fn execute(
+    command: Command,
+    context: &AppContext,
+) -> Result<CommandExecution, CommandError> {
     match command {
-        Command::Python(args) => execute_python(args, context).await,
-        Command::Init(args) => execute_init(args, context).await,
-        Command::Use(args) => execute_use(args, context).await,
-        Command::Add(args) => execute_add(args, context).await,
-        Command::Remove(args) => execute_remove(args, context).await,
-        Command::Sync(args) => execute_sync(args, context).await,
+        Command::Python(args) => execute_python(args, context)
+            .await
+            .map(CommandExecution::success),
+        Command::Init(args) => execute_init(args, context)
+            .await
+            .map(CommandExecution::success),
+        Command::Use(args) => execute_use(args, context)
+            .await
+            .map(CommandExecution::success),
+        Command::Add(args) => execute_add(args, context)
+            .await
+            .map(CommandExecution::success),
+        Command::Remove(args) => execute_remove(args, context)
+            .await
+            .map(CommandExecution::success),
+        Command::Sync(args) => execute_sync(args, context)
+            .await
+            .map(CommandExecution::success),
+        Command::Run(args) => execute_run(args, context).await,
     }
 }
 
@@ -65,4 +101,11 @@ async fn execute_remove(args: RemoveArgs, context: &AppContext) -> Result<Output
 
 async fn execute_sync(args: SyncArgs, context: &AppContext) -> Result<Output, CommandError> {
     sync::execute(args, context).await
+}
+
+async fn execute_run(
+    args: RunArgs,
+    context: &AppContext,
+) -> Result<CommandExecution, CommandError> {
+    run::execute(args, context).await
 }

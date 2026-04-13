@@ -129,12 +129,14 @@ impl AppPaths {
 
     pub fn package_artifact_cache_file(&self, sha256: &str, artifact_name: &str) -> Utf8PathBuf {
         self.package_artifact_cache_dir()
-            .join(format!("{sha256}-{artifact_name}"))
+            .join(sha256)
+            .join(artifact_name)
     }
 
     pub fn package_artifact_staging_file(&self, sha256: &str, artifact_name: &str) -> Utf8PathBuf {
         self.package_artifact_staging_dir()
-            .join(format!("{sha256}-{artifact_name}.part"))
+            .join(sha256)
+            .join(format!("{artifact_name}.part"))
     }
 
     pub fn project_environments_dir(&self) -> Utf8PathBuf {
@@ -237,13 +239,13 @@ mod tests {
         assert_eq!(
             paths.package_artifact_cache_file("deadbeef", "attrs-25.1.0-py3-none-any.whl"),
             Utf8PathBuf::from(
-                "/tmp/cache/artifacts/verified/deadbeef-attrs-25.1.0-py3-none-any.whl"
+                "/tmp/cache/artifacts/verified/deadbeef/attrs-25.1.0-py3-none-any.whl"
             )
         );
         assert_eq!(
             paths.package_artifact_staging_file("deadbeef", "attrs-25.1.0-py3-none-any.whl"),
             Utf8PathBuf::from(
-                "/tmp/cache/artifacts/staging/deadbeef-attrs-25.1.0-py3-none-any.whl.part"
+                "/tmp/cache/artifacts/staging/deadbeef/attrs-25.1.0-py3-none-any.whl.part"
             )
         );
     }

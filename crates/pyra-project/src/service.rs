@@ -21,6 +21,7 @@ use sha2::{Digest, Sha256};
 use crate::{
     ProjectError,
     environment::{ProjectEnvironmentRecord, ProjectEnvironmentStore, ProjectPythonSelection},
+    execution::ProjectExecutionPlan,
     identity::{ProjectIdentity, find_project_root},
     init::{InitProjectOutcome, create_initial_layout, validate_initial_layout},
     pyproject::{
@@ -78,6 +79,19 @@ pub struct RemoveProjectOutcome {
     pub package: String,
     pub scope: DependencyDeclarationScope,
     pub sync: SyncProjectOutcome,
+}
+
+/// Request to execute one command target through the synchronized project
+/// environment.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct RunProjectRequest {
+    pub target: String,
+}
+
+/// Outcome for `pyra run`, including the child process exit code.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct RunProjectOutcome {
+    pub exit_code: i32,
 }
 
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
@@ -217,6 +231,35 @@ impl ProjectService {
         })
     }
 
+    pub async fn run(
+        self,
+        context: &AppContext,
+        request: RunProjectRequest,
+    ) -> Result<RunProjectOutcome, ProjectError> {
+        let sync = self.sync(context, SyncProjectRequest::default()).await?;
+        let input = ProjectSyncInputLoader.load(context)?;
+        let identity = input.project_identity()?;
+        let installation = selected_installation(context, &input.pinned_python)?;
+        input.validate_selected_interpreter(&installation.version)?;
+        let environment = ProjectEnvironmentStore.ensure(
+            context,
+            &identity,
+            &ProjectPythonSelection {
+                selector: input.pinned_python.clone(),
+                installation: installation.clone(),
+            },
+        )?;
+        let plan = ProjectExecutionPlan::resolve(
+            &input.pyproject_path,
+            &input.project_root,
+            &environment.environment_path,
+            &request.target,
+        )?;
+        let exit_code = plan.execute(&environment.interpreter_path, &sync.project_root)?;
+
+        Ok(RunProjectOutcome { exit_code })
+    }
+
     pub fn select_latest_installed_python(
         installations: &[InstalledPythonRecord],
     ) -> Result<InstalledPythonRecord, ProjectError> {
@@ -234,18 +277,7 @@ impl ProjectService {
     ) -> Result<SyncProjectOutcome, ProjectError> {
         let input = ProjectSyncInputLoader.load(context)?;
         let identity = input.project_identity()?;
-        let installations = pyra_python::PythonInstallStore
-            .list_installed(context)
-            .map_err(|source| ProjectError::PinnedPythonNotInstalled {
-                selector: input.pinned_python.to_string(),
-                source,
-            })?;
-        let installation = pyra_python::PythonInstallStore
-            .select_installed(&installations, &input.pinned_python)
-            .map_err(|source| ProjectError::PinnedPythonNotInstalled {
-                selector: input.pinned_python.to_string(),
-                source,
-            })?;
+        let installation = selected_installation(context, &input.pinned_python)?;
         input.validate_selected_interpreter(&installation.version)?;
         let selection = SyncSelectionResolver.resolve(&input, &request.selection)?;
         let environment = ProjectEnvironmentStore.ensure(
@@ -354,6 +386,24 @@ impl ProjectService {
             project_installed: input.build_system_present,
         })
     }
+}
+
+fn selected_installation(
+    context: &AppContext,
+    pinned_python: &PythonVersionRequest,
+) -> Result<InstalledPythonRecord, ProjectError> {
+    let installations = pyra_python::PythonInstallStore
+        .list_installed(context)
+        .map_err(|source| ProjectError::PinnedPythonNotInstalled {
+            selector: pinned_python.to_string(),
+            source,
+        })?;
+    pyra_python::PythonInstallStore
+        .select_installed(&installations, pinned_python)
+        .map_err(|source| ProjectError::PinnedPythonNotInstalled {
+            selector: pinned_python.to_string(),
+            source,
+        })
 }
 
 fn resolver_environment(

@@ -1,8 +1,9 @@
 # Run Model
 
-`pyra run` is not implemented yet, but its behavior should be constrained now so
-it builds on the existing dependency and environment model rather than creating a
-second execution system.
+`pyra run` now exists in a minimal form.
+
+Its behavior should stay constrained so it builds on the existing dependency and
+environment model rather than creating a second execution system.
 
 ## Core Rule
 
@@ -18,22 +19,26 @@ That means `run` should depend on sync semantics, not duplicate them.
 
 ## Expected Guarantees
 
-When implemented, `pyra run` should:
+Current guarantees:
 
 - use the project's selected Pyra-managed interpreter
 - use the centralized environment for that project identity
 - ensure dependency state matches the lock before execution
 - present a simple, predictable command model
 
+Current minimal scope:
+
+- one run target is accepted
+- lookup order is:
+  1. `[project.scripts]`
+  2. console scripts from installed packages
+  3. `.py` file fallback
+- child exit codes are returned from `pyra run`
+- no extra argument passthrough is implemented yet
+
 ## Lookup Order
 
-Current intended lookup order remains:
-
-1. `[project.scripts]`
-2. console scripts from installed packages
-3. `.py` file fallback
-
-That order should be documented and preserved explicitly.
+That lookup order should be preserved explicitly as execution support expands.
 
 ## Relationship To Sync
 

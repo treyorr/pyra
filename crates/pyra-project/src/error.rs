@@ -227,6 +227,22 @@ pub enum ProjectError {
     },
     #[error("failed to install the current project into the environment")]
     InstallEditableProject { interpreter: String, stderr: String },
+    #[error("the requested run target `{target}` does not exist")]
+    RunTargetNotFound { target: String },
+    #[error("`[project.scripts].{name}` in {path} must be a string")]
+    InvalidProjectScriptDefinition { path: String, name: String },
+    #[error("`[project.scripts].{name}` does not use `module:function` syntax")]
+    InvalidProjectScriptEntryPoint {
+        path: String,
+        name: String,
+        value: String,
+    },
+    #[error("failed to start run target `{target}`")]
+    StartRunTarget {
+        target: String,
+        #[source]
+        source: io::Error,
+    },
 }
 
 impl UserFacingError for ProjectError {
@@ -635,6 +651,37 @@ impl UserFacingError for ProjectError {
             .with_detail("The project declares a build system, so Pyra attempted an editable install after syncing locked dependencies.")
             .with_suggestion("Check the project's build backend configuration and retry.")
             .with_verbose_detail(format!("interpreter: {interpreter}\nstderr: {stderr}")),
+            Self::RunTargetNotFound { target } => ErrorReport::new(
+                ErrorKind::User,
+                format!("Pyra could not find a run target named `{target}`."),
+            )
+            .with_detail("`pyra run` looks in `[project.scripts]`, then the synchronized environment's console scripts, then for a `.py` file path.")
+            .with_suggestion("Define the script in `pyproject.toml`, install the package that provides it, or pass a `.py` file path and retry."),
+            Self::InvalidProjectScriptDefinition { path, name } => ErrorReport::new(
+                ErrorKind::User,
+                format!("Pyra could not use `[project.scripts].{name}`."),
+            )
+            .with_detail("Project script entries must be string values so Pyra can resolve one callable target.")
+            .with_suggestion("Change the script entry to a string like `\"package.module:main\"` and retry.")
+            .with_verbose_detail(path.clone()),
+            Self::InvalidProjectScriptEntryPoint {
+                path,
+                name,
+                value,
+            } => ErrorReport::new(
+                ErrorKind::User,
+                format!("Pyra could not parse `[project.scripts].{name}`."),
+            )
+            .with_detail("Project script entries must use `module:function` syntax so Pyra can execute them through the managed interpreter.")
+            .with_suggestion("Update the script entry to a callable reference like `\"package.module:main\"` and retry.")
+            .with_verbose_detail(format!("path: {path}\nvalue: {value}")),
+            Self::StartRunTarget { target, source } => ErrorReport::new(
+                ErrorKind::System,
+                format!("Pyra could not start `{target}`."),
+            )
+            .with_detail("Pyra synchronized the project environment, but the operating system rejected the execution step.")
+            .with_suggestion("Check that the managed interpreter and environment scripts still exist, then retry.")
+            .with_verbose_detail(source.to_string()),
         }
     }
 }

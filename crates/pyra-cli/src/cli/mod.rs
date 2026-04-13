@@ -28,6 +28,8 @@ pub enum Command {
     Remove(RemoveArgs),
     /// Reconcile the centralized environment from `pyproject.toml` and `pylock.toml`.
     Sync(SyncArgs),
+    /// Execute a project command through the synchronized centralized environment.
+    Run(RunArgs),
 }
 
 #[derive(Debug, Args)]
@@ -135,4 +137,10 @@ pub struct SyncArgs {
     /// Sync only the `dev` dependency group and exclude base dependencies.
     #[arg(long)]
     pub only_dev: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct RunArgs {
+    /// Project script, installed console script, or `.py` file to execute.
+    pub target: String,
 }

@@ -1253,7 +1253,7 @@ fn build_fake_managed_python(
     let runner_path = root.join("fake-python-runner.py");
     fs::write(
         &runner_path,
-        r#"import json
+        r##"import json
 import os
 import pathlib
 import sys
@@ -1277,6 +1277,17 @@ if args[:3] == ["-m", "venv", "--clear"] and len(args) == 4:
     if target.exists():
         shutil.rmtree(target)
     target.mkdir(parents=True, exist_ok=True)
+    bin_dir = target / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    python_path = bin_dir / "python"
+    python_path.write_text(
+        "#!/bin/sh\\nexec \\"{}\\"" \\"{}\\"" \\"$@\\"\\n".format(
+            sys.executable,
+            pathlib.Path(__file__),
+        ),
+        encoding="utf-8",
+    )
+    python_path.chmod(0o755)
     log({"kind": "venv", "target": str(target)})
     raise SystemExit(0)
 
@@ -1290,7 +1301,7 @@ if args[:4] == ["-m", "pip", "uninstall", "-y"] and len(args) == 5:
     raise SystemExit(0)
 
 raise SystemExit(f"unexpected fake interpreter args: {args}")
-"#,
+"##,
     )?;
 
     let wrapper_path = root.join("fake-python");

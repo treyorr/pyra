@@ -49,7 +49,7 @@ impl ProjectEnvironmentStore {
             let record = self.read_record(&metadata_path)?;
             if record.environment_path.exists()
                 && record.python_version == python.installation.version
-                && record.interpreter_path == python.installation.executable_path
+                && record.interpreter_path == environment_interpreter_path(&record.environment_path)
             {
                 return Ok(record);
             }
@@ -104,7 +104,10 @@ impl ProjectEnvironmentStore {
             project_root: identity.root.clone(),
             python_selector: python.selector.to_string(),
             python_version: python.installation.version,
-            interpreter_path: python.installation.executable_path.clone(),
+            // The environment record stores the environment's Python path
+            // because sync and run must act on the centralized environment
+            // itself, not on the base managed interpreter used to create it.
+            interpreter_path: environment_interpreter_path(&environment_path),
             environment_path: environment_path.clone(),
             created_at_unix_seconds: created_at,
             updated_at_unix_seconds: now,
@@ -155,6 +158,14 @@ impl ProjectEnvironmentStore {
             })?;
 
         Ok(())
+    }
+}
+
+fn environment_interpreter_path(environment_path: &Utf8Path) -> Utf8PathBuf {
+    if cfg!(windows) {
+        environment_path.join("Scripts").join("python.exe")
+    } else {
+        environment_path.join("bin").join("python")
     }
 }
 

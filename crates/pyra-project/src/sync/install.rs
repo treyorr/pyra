@@ -283,12 +283,20 @@ async fn prepare_verified_artifact(
 
     let artifact_name = normalized_artifact_name(artifact);
     let cached_path = paths.package_artifact_cache_file(&artifact.sha256, &artifact_name);
+    let cached_parent = cached_path
+        .parent()
+        .expect("artifact cache file should have a parent");
+    ensure_artifact_dir(cached_parent)?;
     if cached_path.exists() && file_matches_sha256(&cached_path, &artifact.sha256)? {
         return Ok(cached_path);
     }
     remove_file_if_exists(&cached_path)?;
 
     let staged_path = paths.package_artifact_staging_file(&artifact.sha256, &artifact_name);
+    let staged_parent = staged_path
+        .parent()
+        .expect("artifact staging file should have a parent");
+    ensure_artifact_dir(staged_parent)?;
     remove_file_if_exists(&staged_path)?;
 
     let bytes = download_artifact_bytes(artifact).await?;

@@ -1,5 +1,6 @@
 mod environment;
 mod error;
+mod execution;
 mod identity;
 mod init;
 mod pyproject;
@@ -15,8 +16,8 @@ pub use pyproject::{
 };
 pub use service::{
     AddProjectOutcome, AddProjectRequest, InitProjectRequest, InitProjectWithPythonOutcome,
-    ProjectService, RemoveProjectOutcome, RemoveProjectRequest, UseProjectPythonOutcome,
-    UseProjectPythonRequest,
+    ProjectService, RemoveProjectOutcome, RemoveProjectRequest, RunProjectOutcome,
+    RunProjectRequest, UseProjectPythonOutcome, UseProjectPythonRequest,
 };
 pub use service::{SyncLockMode, SyncProjectOutcome, SyncProjectRequest};
 pub use sync::SyncSelectionRequest;

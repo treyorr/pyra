@@ -30,6 +30,7 @@ Pyra currently reads:
 - `[project].name`
 - `[project].dependencies`
 - `[project].optional-dependencies`
+- `[project].scripts`
 - `[project].requires-python`
 - `[build-system]` presence
 - `[dependency-groups]`
@@ -59,6 +60,8 @@ Current command requirements:
 - `pyra sync` supports empty dependency lists.
 - `pyra sync` treats `[build-system]` as the switch for editable project
   installation.
+- `pyra run` reuses the same sync requirements, then looks up targets through
+  `[project].scripts`, installed console scripts, and `.py` file fallback.
 
 ## `[tool.pyra]`
 
