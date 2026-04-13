@@ -30,9 +30,9 @@ use crate::{
     },
     sync::{
         CURRENT_RESOLUTION_STRATEGY, EnvironmentInstaller, LockArtifact, LockDependencyRef,
-        LockFile, LockFreshness, LockMarker, LockMarkerClause, LockPackage, LockSelection,
-        ProjectSyncInput, ProjectSyncInputLoader, ReconciliationPlan, SyncSelectionRequest,
-        SyncSelectionResolver,
+        LockEnvironment, LockFile, LockFreshness, LockMarker, LockMarkerClause, LockPackage,
+        LockSelection, ProjectSyncInput, ProjectSyncInputLoader, ReconciliationPlan,
+        SyncSelectionRequest, SyncSelectionResolver,
     },
 };
 
@@ -554,7 +554,10 @@ async fn resolve_lock(
     Ok(LockFile {
         path: input.pylock_path.clone(),
         requires_python: input.requires_python.clone(),
-        environments: vec![environment_marker(env)],
+        environments: vec![LockEnvironment {
+            id: environment_id(env),
+            marker: environment_marker(env),
+        }],
         extras: input
             .optional_dependencies
             .iter()
@@ -597,6 +600,12 @@ async fn resolve_lock(
             .collect(),
         tool_pyra: freshness.clone(),
     })
+}
+
+// Keep the initial environment id deterministic so later multi-target locks can
+// add more slices without renaming the existing single-environment shape.
+fn environment_id(env: &ResolverEnvironment) -> String {
+    format!("cpython-{}-{}", env.python_full_version, env.target_triple)
 }
 
 fn environment_marker(env: &ResolverEnvironment) -> String {

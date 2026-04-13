@@ -12,7 +12,7 @@ Pyra writes a PEP 751-shaped lock with the following top-level structure:
 - `lock-version = "1.0"`
 - `created-by = "pyra"`
 - `requires-python`
-- `environments`
+- `[[environments]]`
 - `extras`
 - `dependency-groups`
 - `default-groups`
@@ -27,6 +27,7 @@ The authoritative installation inputs are:
 
 - The selected package entries in `[[packages]]`.
 - Package markers.
+- Environment identifiers and markers in `[[environments]]`.
 - Package artifact locations and hashes.
 - Top-level lock metadata used for selection, such as `default-groups`,
   `dependency-groups`, and `extras`.
@@ -40,6 +41,27 @@ Pyra installs from the lock without re-resolving.
 Pyra records dependency edges there for traceability, but current installation
 logic does not walk those edges. Selection is driven by markers and the locked
 package/artifact set.
+
+## `[[environments]]`
+
+Pyra now writes explicit environment tables instead of a bare string array.
+
+Current fields are:
+
+- `id`
+- `marker`
+
+Why this exists:
+
+- It gives each target environment a stable identifier before package entries
+  start carrying environment membership.
+- It keeps the lock schema honest about the difference between one host marker
+  and one named environment slice.
+- It lets later multi-target work extend the environment metadata without
+  redesigning the top-level lock shape again.
+
+Current writes still contain one environment slice, but the schema is now ready
+to round-trip more than one.
 
 ## `tool.pyra`
 
@@ -71,13 +93,14 @@ Why this exists:
 `pyra-default` is an internal modeling detail and should not be exposed as a
 user-facing dependency group.
 
-## `current-platform-union-v1`
+## `environment-scoped-union-v1`
 
 The current resolution strategy identifier means:
 
 - Resolve for one selected interpreter.
 - Resolve for one current platform.
 - Resolve one union of base dependencies, all groups, and all extras.
+- Record explicit environment ids and markers in the lock schema.
 - Use marker-based selection from that unified lock.
 
 This identifier is part of lock freshness so Pyra can change strategy later

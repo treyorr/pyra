@@ -12,9 +12,10 @@ use crate::ProjectError;
 
 use super::LockMarker;
 
-/// The current lock semantics cover one interpreter on one current platform
-/// while resolving the union of base dependencies, groups, and extras.
-pub const CURRENT_RESOLUTION_STRATEGY: &str = "current-platform-union-v1";
+/// The current lock semantics use explicit environment ids so one lock can
+/// grow toward multiple environment slices without changing package metadata
+/// or selection rules again first.
+pub const CURRENT_RESOLUTION_STRATEGY: &str = "environment-scoped-union-v1";
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct LockArtifact {
@@ -53,10 +54,18 @@ pub struct LockFreshness {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
+pub struct LockEnvironment {
+    /// Stable identifier for one target environment slice in the lock.
+    pub id: String,
+    /// Marker describing when this environment slice applies.
+    pub marker: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct LockFile {
     pub path: Utf8PathBuf,
     pub requires_python: Option<String>,
-    pub environments: Vec<String>,
+    pub environments: Vec<LockEnvironment>,
     pub extras: Vec<String>,
     pub dependency_groups: Vec<String>,
     pub default_groups: Vec<String>,
@@ -94,7 +103,7 @@ impl LockFile {
             })?;
 
         let environments =
-            string_array(document.as_table().get("environments")).map_err(|detail| {
+            parse_environments(document.as_table().get("environments")).map_err(|detail| {
                 ProjectError::ParseLockfile {
                     path: path.to_string(),
                     detail,
@@ -146,7 +155,6 @@ impl LockFile {
     pub fn write(&self) -> Result<(), ProjectError> {
         let mut output = String::new();
         writeln!(output, "lock-version = \"1.0\"").expect("string write");
-        write_string_array(&mut output, "environments", &self.environments);
         if let Some(requires_python) = &self.requires_python {
             writeln!(output, "requires-python = {:?}", requires_python).expect("string write");
         }
@@ -155,6 +163,10 @@ impl LockFile {
         write_string_array(&mut output, "default-groups", &self.default_groups);
         writeln!(output, "created-by = \"pyra\"").expect("string write");
         writeln!(output).expect("string write");
+        write_environments(&mut output, &self.environments);
+        if !self.environments.is_empty() {
+            writeln!(output).expect("string write");
+        }
 
         for package in &self.packages {
             writeln!(output, "[[packages]]").expect("string write");
@@ -230,6 +242,14 @@ fn write_string_array(output: &mut String, key: &str, values: &[String]) {
     writeln!(output, "{key} = [{rendered}]").expect("string write");
 }
 
+fn write_environments(output: &mut String, environments: &[LockEnvironment]) {
+    for environment in environments {
+        writeln!(output, "[[environments]]").expect("string write");
+        writeln!(output, "id = {:?}", environment.id).expect("string write");
+        writeln!(output, "marker = {:?}", environment.marker).expect("string write");
+    }
+}
+
 fn write_artifact(output: &mut String, table_name: &str, artifact: &LockArtifact) {
     writeln!(output, "[{table_name}]").expect("string write");
     write_artifact_body(output, artifact);
@@ -264,6 +284,33 @@ fn string_array(item: Option<&Item>) -> Result<Vec<String>, String> {
 
 fn string_value(item: Option<&Item>) -> Option<String> {
     item.and_then(Item::as_str).map(ToString::to_string)
+}
+
+fn parse_environments(item: Option<&Item>) -> Result<Vec<LockEnvironment>, String> {
+    let Some(item) = item else {
+        return Ok(Vec::new());
+    };
+    if let Some(array) = item.as_array_of_tables() {
+        return array.iter().map(parse_environment).collect();
+    }
+    if let Some(array) = item.as_array() {
+        // Legacy locks stored environments as a bare string array. Keep
+        // parsing them so freshness can reject the old strategy cleanly.
+        return array
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                let marker = value
+                    .as_str()
+                    .ok_or_else(|| "expected string array entry".to_string())?;
+                Ok(LockEnvironment {
+                    id: format!("legacy-env-{index}"),
+                    marker: marker.to_string(),
+                })
+            })
+            .collect();
+    }
+    Err("expected environments array or array-of-tables".to_string())
 }
 
 fn parse_package(table: &Table) -> Result<LockPackage, String> {
@@ -326,6 +373,21 @@ fn parse_package(table: &Table) -> Result<LockPackage, String> {
         dependencies,
         sdist,
         wheels,
+    })
+}
+
+fn parse_environment(table: &Table) -> Result<LockEnvironment, String> {
+    Ok(LockEnvironment {
+        id: table
+            .get("id")
+            .and_then(Item::as_str)
+            .ok_or_else(|| "environment missing id".to_string())?
+            .to_string(),
+        marker: table
+            .get("marker")
+            .and_then(Item::as_str)
+            .ok_or_else(|| "environment missing marker".to_string())?
+            .to_string(),
     })
 }
 
@@ -410,8 +472,8 @@ mod tests {
     use camino::Utf8PathBuf;
 
     use super::{
-        CURRENT_RESOLUTION_STRATEGY, LockArtifact, LockDependencyRef, LockFile, LockFreshness,
-        LockMarker, LockPackage,
+        CURRENT_RESOLUTION_STRATEGY, LockArtifact, LockDependencyRef, LockEnvironment, LockFile,
+        LockFreshness, LockMarker, LockPackage,
     };
     use crate::sync::LockMarkerClause;
 
@@ -431,6 +493,40 @@ mod tests {
             CURRENT_RESOLUTION_STRATEGY
         );
         assert!(reread.is_fresh(&freshness));
+    }
+
+    #[test]
+    fn round_trips_multiple_environment_identifiers() {
+        let temp_dir = tempfile::tempdir().expect("temporary directory");
+        let path =
+            Utf8PathBuf::from_path_buf(temp_dir.path().join("pylock.toml")).expect("utf-8 path");
+        let mut lock = sample_lock(path.clone());
+        lock.environments = vec![
+            LockEnvironment {
+                id: "cpython-3.13.12-aarch64-apple-darwin".to_string(),
+                marker: "sys_platform == 'darwin' and platform_machine == 'arm64'".to_string(),
+            },
+            LockEnvironment {
+                id: "cpython-3.13.12-x86_64-unknown-linux-gnu".to_string(),
+                marker: "sys_platform == 'linux' and platform_machine == 'x86_64'".to_string(),
+            },
+        ];
+
+        lock.write().expect("write lock");
+        let reread = LockFile::read(&path).expect("read lock");
+
+        assert_eq!(reread.environments, lock.environments);
+        assert_eq!(
+            reread
+                .environments
+                .iter()
+                .map(|environment| environment.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "cpython-3.13.12-aarch64-apple-darwin",
+                "cpython-3.13.12-x86_64-unknown-linux-gnu",
+            ]
+        );
     }
 
     #[test]
@@ -483,7 +579,7 @@ input-fingerprint = "fingerprint"
 interpreter-version = "3.13.12"
 target-triple = "aarch64-apple-darwin"
 index-url = "https://pypi.org/simple"
-resolution-strategy = "current-platform-union-v1"
+resolution-strategy = "environment-scoped-union-v1"
 "#,
         )
         .expect("write invalid lock");
@@ -492,6 +588,47 @@ resolution-strategy = "current-platform-union-v1"
         match error {
             crate::ProjectError::ParseLockfile { detail, .. } => {
                 assert!(detail.contains("invalid package marker"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_environment_schema() {
+        let temp_dir = tempfile::tempdir().expect("temporary directory");
+        let path =
+            Utf8PathBuf::from_path_buf(temp_dir.path().join("pylock.toml")).expect("utf-8 path");
+        fs::write(
+            path.as_std_path(),
+            r#"
+lock-version = "1.0"
+
+[[environments]]
+marker = "sys_platform == 'darwin'"
+
+extras = []
+dependency-groups = []
+default-groups = []
+created-by = "pyra"
+
+[[packages]]
+name = "attrs"
+version = "25.1.0"
+
+[tool.pyra]
+input-fingerprint = "fingerprint"
+interpreter-version = "3.13.12"
+target-triple = "aarch64-apple-darwin"
+index-url = "https://pypi.org/simple"
+resolution-strategy = "environment-scoped-union-v1"
+"#,
+        )
+        .expect("write invalid lock");
+
+        let error = LockFile::read(&path).expect_err("invalid lock");
+        match error {
+            crate::ProjectError::ParseLockfile { detail, .. } => {
+                assert!(detail.contains("environment missing id"));
             }
             other => panic!("unexpected error: {other:?}"),
         }
@@ -541,7 +678,10 @@ resolution-strategy = "current-platform-union-v1"
         LockFile {
             path,
             requires_python: Some("==3.13.*".to_string()),
-            environments: vec!["sys_platform == 'darwin'".to_string()],
+            environments: vec![LockEnvironment {
+                id: "cpython-3.13.12-aarch64-apple-darwin".to_string(),
+                marker: "sys_platform == 'darwin'".to_string(),
+            }],
             extras: vec!["feature".to_string()],
             dependency_groups: vec!["dev".to_string()],
             default_groups: vec!["pyra-default".to_string(), "dev".to_string()],

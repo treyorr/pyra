@@ -20,7 +20,7 @@ Pyra does not currently produce one universal multi-platform lock.
 
 Current strategy identifier:
 
-- `current-platform-union-v1`
+- `environment-scoped-union-v1`
 
 Current strategy behavior:
 
@@ -28,6 +28,7 @@ Current strategy behavior:
 - resolve all dependency groups
 - resolve all extras
 - solve one combined dependency graph
+- record one or more explicit environment ids in the lock schema
 - record root-set membership so installation can later select the appropriate subset
 
 This strategy intentionally favors one coherent implementation over premature

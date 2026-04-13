@@ -71,7 +71,7 @@ This keeps the first lock implementation small and coherent, but it means Pyra
 may reject projects where separate groups or extras are independently valid but
 conflict when solved together.
 
-The current strategy identifier is `current-platform-union-v1`.
+The current strategy identifier is `environment-scoped-union-v1`.
 
 ## Install Selection
 

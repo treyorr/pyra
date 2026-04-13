@@ -510,7 +510,6 @@ fn write_lock_fixture(
     let target_triple = HostTarget::detect()?.target_triple().to_string();
 
     let mut lock = String::from("lock-version = \"1.0\"\n");
-    lock.push_str("environments = []\n");
     if let Some(requires_python) = requires_python {
         lock.push_str(&format!("requires-python = {:?}\n", requires_python));
     }
@@ -518,6 +517,15 @@ fn write_lock_fixture(
     lock.push_str("dependency-groups = []\n");
     lock.push_str("default-groups = [\"pyra-default\"]\n");
     lock.push_str("created-by = \"pyra\"\n\n");
+    lock.push_str("[[environments]]\n");
+    lock.push_str(&format!(
+        "id = {:?}\n",
+        format!("cpython-{pinned_python}-{target_triple}")
+    ));
+    lock.push_str(&format!(
+        "marker = {:?}\n\n",
+        format!("implementation_name == 'cpython' and python_full_version == '{pinned_python}'")
+    ));
     lock.push_str("[[packages]]\n");
     lock.push_str("name = \"fixture\"\n");
     lock.push_str("version = \"1.0.0\"\n");
@@ -527,7 +535,7 @@ fn write_lock_fixture(
     lock.push_str(&format!("interpreter-version = {:?}\n", pinned_python));
     lock.push_str(&format!("target-triple = {:?}\n", target_triple));
     lock.push_str("index-url = \"https://pypi.org/simple\"\n");
-    lock.push_str("resolution-strategy = \"current-platform-union-v1\"\n");
+    lock.push_str("resolution-strategy = \"environment-scoped-union-v1\"\n");
 
     fs::write(project_root.join("pylock.toml"), lock)?;
     Ok(())

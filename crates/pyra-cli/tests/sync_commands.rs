@@ -350,7 +350,7 @@ python = "3.13.12"
         .success();
 
     let first_lock = fs::read_to_string(project_root.join("pylock.toml")).expect("pylock");
-    assert!(first_lock.contains("resolution-strategy = \"current-platform-union-v1\""));
+    assert!(first_lock.contains("resolution-strategy = \"environment-scoped-union-v1\""));
 
     base_command(&home, &state_path)
         .current_dir(&project_root)
@@ -625,7 +625,7 @@ python = "3.13.12"
 
     let lock_path = project_root.join("pylock.toml");
     let stale_lock = fs::read_to_string(&lock_path).expect("pylock").replace(
-        "resolution-strategy = \"current-platform-union-v1\"",
+        "resolution-strategy = \"environment-scoped-union-v1\"",
         "resolution-strategy = \"legacy-strategy-v0\"",
     );
     fs::write(&lock_path, stale_lock).expect("stale lock");
@@ -639,7 +639,7 @@ python = "3.13.12"
         .stdout(contains("Updated `pylock.toml`"));
 
     let regenerated_lock = fs::read_to_string(&lock_path).expect("pylock");
-    assert!(regenerated_lock.contains("resolution-strategy = \"current-platform-union-v1\""));
+    assert!(regenerated_lock.contains("resolution-strategy = \"environment-scoped-union-v1\""));
 }
 
 #[test]
