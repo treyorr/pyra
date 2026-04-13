@@ -26,7 +26,7 @@ use crate::{
     init::{InitProjectOutcome, create_initial_layout, validate_initial_layout},
     pyproject::{
         DependencyDeclarationScope, add_dependency_requirement, read_python_selector,
-        remove_dependency_requirement, update_python_selector,
+        remove_dependency_requirement, update_python_selector, validate_project_requires_python,
     },
     sync::{
         CURRENT_RESOLUTION_STRATEGY, EnvironmentInstaller, LockArtifact, LockDependencyRef,
@@ -169,17 +169,15 @@ impl ProjectService {
         let identity = ProjectIdentity::from_root(&project_root)?;
         let pyproject_path = project_root.join("pyproject.toml");
         let _ = read_python_selector(&pyproject_path)?;
+        validate_project_requires_python(&pyproject_path, &request.python.installation.version)?;
         update_python_selector(&pyproject_path, &request.python.selector)?;
         let project_context = AppContext::new(
             project_root.clone(),
             context.paths.clone(),
             context.verbosity,
         );
-        let environment = ProjectEnvironmentStore.create_or_refresh(
-            &project_context,
-            &identity,
-            &request.python,
-        )?;
+        let environment =
+            ProjectEnvironmentStore.ensure(&project_context, &identity, &request.python)?;
 
         Ok(UseProjectPythonOutcome {
             project_root,

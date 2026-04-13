@@ -9,8 +9,9 @@ use std::fs;
 use std::str::FromStr;
 
 use camino::Utf8Path;
+use pep440_rs::{Version, VersionSpecifiers};
 use pep508_rs::Requirement;
-use pyra_python::PythonVersionRequest;
+use pyra_python::{PythonVersion, PythonVersionRequest};
 use toml_edit::{Array, DocumentMut, Item, Table, Value, value};
 
 use crate::ProjectError;
@@ -65,6 +66,56 @@ pub fn update_python_selector(
     let mut document = load_document(pyproject_path)?;
     set_python_selector(&mut document, selector);
     write_document(pyproject_path, &document)
+}
+
+/// Validates the project's declared Python support range, if present, against
+/// one selected managed interpreter version.
+pub fn validate_project_requires_python(
+    pyproject_path: &Utf8Path,
+    interpreter: &PythonVersion,
+) -> Result<(), ProjectError> {
+    let document = load_document(pyproject_path)?;
+    let requires_python = document
+        .as_table()
+        .get("project")
+        .and_then(Item::as_table)
+        .and_then(|project| project.get("requires-python"))
+        .and_then(Item::as_str);
+
+    validate_requires_python_constraint(pyproject_path, requires_python, interpreter)
+}
+
+pub(crate) fn validate_requires_python_constraint(
+    pyproject_path: &Utf8Path,
+    requires_python: Option<&str>,
+    interpreter: &PythonVersion,
+) -> Result<(), ProjectError> {
+    let Some(requires_python) = requires_python else {
+        return Ok(());
+    };
+
+    let specifiers = VersionSpecifiers::from_str(requires_python).map_err(|error| {
+        ProjectError::InvalidRequiresPython {
+            path: pyproject_path.to_string(),
+            value: requires_python.to_string(),
+            detail: error.to_string(),
+        }
+    })?;
+    let interpreter = Version::from_str(&interpreter.to_string()).map_err(|error| {
+        ProjectError::InvalidManagedPythonVersion {
+            value: interpreter.to_string(),
+            detail: error.to_string(),
+        }
+    })?;
+
+    if specifiers.contains(&interpreter) {
+        Ok(())
+    } else {
+        Err(ProjectError::PinnedPythonIncompatibleWithProject {
+            interpreter: interpreter.to_string(),
+            requires_python: requires_python.to_string(),
+        })
+    }
 }
 
 /// Adds a dependency declaration to the selected manifest scope without

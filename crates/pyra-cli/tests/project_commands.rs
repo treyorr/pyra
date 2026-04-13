@@ -1,4 +1,6 @@
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 
@@ -32,6 +34,221 @@ fn use_pins_python_and_prepares_centralized_environment() {
     assert!(pyproject.contains("[tool.pyra]"));
     assert!(pyproject.contains("python = \"3.13\""));
     assert_environment_prepared(home.path(), &project_root, "3.13");
+}
+
+#[cfg(unix)]
+#[test]
+fn use_repin_to_different_patch_version_rebuilds_environment_and_invalidates_lock() {
+    let home = temp_env_root();
+    let fixture = write_catalog_fixture(home.path(), &["3.13.12", "3.13.13"]);
+    let project_root = home.path().join("workspace").join("sample-use-repin-patch");
+    fs::create_dir_all(&project_root).expect("project root");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        r#"[project]
+name = "sample-use-repin-patch"
+version = "0.1.0"
+requires-python = ">=3.13,<3.14"
+dependencies = []
+
+[tool.pyra]
+python = "3.13.12"
+"#,
+    )
+    .expect("pyproject");
+
+    let first_log = home.path().join("fake-python-3.13.12.jsonl");
+    let second_log = home.path().join("fake-python-3.13.13.jsonl");
+    let first_python =
+        build_fake_managed_python(home.path(), "3.13.12", &first_log).expect("fake python");
+    let second_python =
+        build_fake_managed_python(home.path(), "3.13.13", &second_log).expect("fake python");
+    seed_managed_install_with_executable(&home, "3.13.12", &first_python).expect("managed install");
+    seed_managed_install_with_executable(&home, "3.13.13", &second_python)
+        .expect("managed install");
+
+    base_command(&home)
+        .current_dir(&project_root)
+        .env("PYRA_PYTHON_RELEASE_CATALOG_PATH", &fixture.catalog_path)
+        .args(["use", "3.13.12"])
+        .assert()
+        .success()
+        .stdout(contains("Using Python 3.13.12 for this project."));
+    assert_eq!(fake_python_venv_count(&first_log).expect("venv count"), 1);
+
+    write_lock_fixture(
+        &project_root,
+        "sample-use-repin-patch",
+        "3.13.12",
+        Some(">=3.13,<3.14"),
+    )
+    .expect("lock fixture");
+    let first_lock = fs::read_to_string(project_root.join("pylock.toml")).expect("pylock");
+
+    base_command(&home)
+        .current_dir(&project_root)
+        .env("PYRA_PYTHON_RELEASE_CATALOG_PATH", &fixture.catalog_path)
+        .args(["use", "3.13.13"])
+        .assert()
+        .success()
+        .stdout(contains("Using Python 3.13.13 for this project."));
+    assert_eq!(fake_python_venv_count(&second_log).expect("venv count"), 1);
+
+    let metadata = read_environment_metadata(home.path(), &project_root);
+    assert_eq!(metadata["python_selector"].as_str(), Some("3.13.13"));
+
+    base_command(&home)
+        .current_dir(&project_root)
+        .args(["sync", "--locked"])
+        .assert()
+        .failure()
+        .stderr(contains("stale"))
+        .stderr(contains("sync --locked"));
+
+    let second_lock = fs::read_to_string(project_root.join("pylock.toml")).expect("pylock");
+    assert_eq!(first_lock, second_lock);
+}
+
+#[cfg(unix)]
+#[test]
+fn use_repin_to_different_minor_version_rebuilds_environment_and_invalidates_lock() {
+    let home = temp_env_root();
+    let fixture = write_catalog_fixture(home.path(), &["3.12.9", "3.13.12"]);
+    let project_root = home.path().join("workspace").join("sample-use-repin-minor");
+    fs::create_dir_all(&project_root).expect("project root");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        r#"[project]
+name = "sample-use-repin-minor"
+version = "0.1.0"
+requires-python = ">=3.12,<3.14"
+dependencies = []
+
+[tool.pyra]
+python = "3.12.9"
+"#,
+    )
+    .expect("pyproject");
+
+    let first_log = home.path().join("fake-python-3.12.9.jsonl");
+    let second_log = home.path().join("fake-python-3.13.12.jsonl");
+    let first_python =
+        build_fake_managed_python(home.path(), "3.12.9", &first_log).expect("fake python");
+    let second_python =
+        build_fake_managed_python(home.path(), "3.13.12", &second_log).expect("fake python");
+    seed_managed_install_with_executable(&home, "3.12.9", &first_python).expect("managed install");
+    seed_managed_install_with_executable(&home, "3.13.12", &second_python)
+        .expect("managed install");
+
+    base_command(&home)
+        .current_dir(&project_root)
+        .env("PYRA_PYTHON_RELEASE_CATALOG_PATH", &fixture.catalog_path)
+        .args(["use", "3.12.9"])
+        .assert()
+        .success()
+        .stdout(contains("Using Python 3.12.9 for this project."));
+    assert_eq!(fake_python_venv_count(&first_log).expect("venv count"), 1);
+
+    write_lock_fixture(
+        &project_root,
+        "sample-use-repin-minor",
+        "3.12.9",
+        Some(">=3.12,<3.14"),
+    )
+    .expect("lock fixture");
+    let first_lock = fs::read_to_string(project_root.join("pylock.toml")).expect("pylock");
+
+    base_command(&home)
+        .current_dir(&project_root)
+        .env("PYRA_PYTHON_RELEASE_CATALOG_PATH", &fixture.catalog_path)
+        .args(["use", "3.13.12"])
+        .assert()
+        .success()
+        .stdout(contains("Using Python 3.13.12 for this project."));
+    assert_eq!(fake_python_venv_count(&second_log).expect("venv count"), 1);
+
+    let metadata = read_environment_metadata(home.path(), &project_root);
+    assert_eq!(metadata["python_selector"].as_str(), Some("3.13.12"));
+
+    base_command(&home)
+        .current_dir(&project_root)
+        .args(["sync", "--locked"])
+        .assert()
+        .failure()
+        .stderr(contains("stale"))
+        .stderr(contains("sync --locked"));
+
+    let second_lock = fs::read_to_string(project_root.join("pylock.toml")).expect("pylock");
+    assert_eq!(first_lock, second_lock);
+}
+
+#[cfg(unix)]
+#[test]
+fn use_rejects_incompatible_repin_against_project_requires_python() {
+    let home = temp_env_root();
+    let fixture = write_catalog_fixture(home.path(), &["3.13.12", "3.12.9"]);
+    let project_root = home
+        .path()
+        .join("workspace")
+        .join("sample-use-incompatible-repin");
+    fs::create_dir_all(&project_root).expect("project root");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        r#"[project]
+name = "sample-use-incompatible-repin"
+version = "0.1.0"
+requires-python = "==3.13.*"
+dependencies = []
+
+[tool.pyra]
+python = "3.13.12"
+"#,
+    )
+    .expect("pyproject");
+
+    let first_log = home.path().join("fake-python-3.13.12.jsonl");
+    let second_log = home.path().join("fake-python-3.12.9.jsonl");
+    let first_python =
+        build_fake_managed_python(home.path(), "3.13.12", &first_log).expect("fake python");
+    let second_python =
+        build_fake_managed_python(home.path(), "3.12.9", &second_log).expect("fake python");
+    seed_managed_install_with_executable(&home, "3.13.12", &first_python).expect("managed install");
+    seed_managed_install_with_executable(&home, "3.12.9", &second_python).expect("managed install");
+
+    base_command(&home)
+        .current_dir(&project_root)
+        .env("PYRA_PYTHON_RELEASE_CATALOG_PATH", &fixture.catalog_path)
+        .args(["use", "3.13.12"])
+        .assert()
+        .success();
+    write_lock_fixture(
+        &project_root,
+        "sample-use-incompatible-repin",
+        "3.13.12",
+        Some("==3.13.*"),
+    )
+    .expect("lock fixture");
+    let original_lock = fs::read_to_string(project_root.join("pylock.toml")).expect("pylock");
+
+    base_command(&home)
+        .current_dir(&project_root)
+        .env("PYRA_PYTHON_RELEASE_CATALOG_PATH", &fixture.catalog_path)
+        .args(["use", "3.12.9"])
+        .assert()
+        .failure()
+        .stderr(contains("==3.13.*"))
+        .stderr(contains("3.12.9"));
+
+    assert_eq!(fake_python_venv_count(&second_log).expect("venv count"), 0);
+    let pyproject = fs::read_to_string(project_root.join("pyproject.toml")).expect("pyproject");
+    assert!(pyproject.contains("python = \"3.13.12\""));
+    assert!(!pyproject.contains("python = \"3.12.9\""));
+
+    let metadata = read_environment_metadata(home.path(), &project_root);
+    assert_eq!(metadata["python_selector"].as_str(), Some("3.13.12"));
+
+    let current_lock = fs::read_to_string(project_root.join("pylock.toml")).expect("pylock");
+    assert_eq!(original_lock, current_lock);
 }
 
 #[test]
@@ -108,17 +325,7 @@ fn temp_env_root() -> TempDir {
 }
 
 fn assert_environment_prepared(home: &Path, project_root: &Path, selector: &str) {
-    let environments_root = home.join("data").join("environments");
-    let entries = fs::read_dir(&environments_root)
-        .expect("environment directory")
-        .collect::<Result<Vec<_>, _>>()
-        .expect("environment entries");
-    assert_eq!(entries.len(), 1);
-
-    let metadata_path = entries[0].path().join("metadata.json");
-    let metadata: serde_json::Value =
-        serde_json::from_slice(&fs::read(&metadata_path).expect("metadata"))
-            .expect("metadata json");
+    let metadata = read_environment_metadata(home, project_root);
     let canonical_project_root = project_root
         .canonicalize()
         .expect("canonical project root")
@@ -140,7 +347,27 @@ fn assert_environment_prepared(home: &Path, project_root: &Path, selector: &str)
     assert!(environment_path.join("pyvenv.cfg").exists());
 }
 
+fn read_environment_metadata(home: &Path, _project_root: &Path) -> serde_json::Value {
+    let environments_root = home.join("data").join("environments");
+    let entries = fs::read_dir(&environments_root)
+        .expect("environment directory")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("environment entries");
+    assert_eq!(entries.len(), 1);
+
+    let metadata_path = entries[0].path().join("metadata.json");
+    serde_json::from_slice(&fs::read(&metadata_path).expect("metadata")).expect("metadata json")
+}
+
 fn seed_managed_install(home: &TempDir, version: &str) -> Result<(), Box<dyn std::error::Error>> {
+    seed_managed_install_with_executable(home, version, &system_python()?)
+}
+
+fn seed_managed_install_with_executable(
+    home: &TempDir,
+    version: &str,
+    executable_path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
     let install_dir = home.path().join("data").join("pythons").join(version);
     fs::create_dir_all(&install_dir)?;
 
@@ -155,7 +382,7 @@ fn seed_managed_install(home: &TempDir, version: &str) -> Result<(), Box<dyn std
         checksum_sha256: None,
         install_dir: camino::Utf8PathBuf::from_path_buf(install_dir.clone())
             .expect("utf-8 install dir"),
-        executable_path: camino::Utf8PathBuf::from_path_buf(system_python()?)
+        executable_path: camino::Utf8PathBuf::from_path_buf(executable_path.to_path_buf())
             .expect("utf-8 python path"),
     };
 
@@ -164,6 +391,145 @@ fn seed_managed_install(home: &TempDir, version: &str) -> Result<(), Box<dyn std
         serde_json::to_vec_pretty(&record)?,
     )?;
 
+    Ok(())
+}
+
+#[cfg(unix)]
+fn build_fake_managed_python(
+    root: &Path,
+    label: &str,
+    log_path: &Path,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let runner_path = root.join(format!("fake-python-{label}-runner.py"));
+    let runner = r##"import json
+import pathlib
+import sys
+
+log_path = pathlib.Path("__LOG_PATH__")
+
+def log(entry):
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(entry) + "\n")
+
+args = sys.argv[1:]
+if args[:1] == ["-c"]:
+    log({"kind": "inspect", "args": args})
+    sys.stdout.write("[]")
+    raise SystemExit(0)
+
+if args[:3] == ["-m", "venv", "--clear"] and len(args) == 4:
+    import shutil
+
+    target = pathlib.Path(args[3])
+    if target.exists():
+        shutil.rmtree(target)
+    target.mkdir(parents=True, exist_ok=True)
+    bin_dir = target / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    python_path = bin_dir / "python"
+    python_path.write_text(
+        "#!/bin/sh\nexec \"{}\" \"{}\" \"$@\"\n".format(
+            sys.executable,
+            pathlib.Path(__file__),
+        ),
+        encoding="utf-8",
+    )
+    python_path.chmod(0o755)
+    (target / "pyvenv.cfg").write_text("home = fake\n", encoding="utf-8")
+    log({"kind": "venv", "target": str(target)})
+    raise SystemExit(0)
+
+if args[:4] == ["-m", "pip", "install", "--no-deps"] and len(args) == 5:
+    log({"kind": "install", "target": args[4]})
+    raise SystemExit(0)
+
+if args[:4] == ["-m", "pip", "uninstall", "-y"] and len(args) == 5:
+    log({"kind": "uninstall", "target": args[4]})
+    raise SystemExit(0)
+
+raise SystemExit(f"unexpected fake interpreter args: {args}")
+"##;
+    fs::write(
+        &runner_path,
+        runner.replace("__LOG_PATH__", &log_path.display().to_string()),
+    )?;
+
+    let wrapper_path = root.join(format!("fake-python-{label}"));
+    let system_python = system_python()?;
+    fs::write(
+        &wrapper_path,
+        format!(
+            "#!/bin/sh\nexport PYRA_FAKE_PYTHON_LOG=\"{}\"\nexec \"{}\" \"{}\" \"$@\"\n",
+            log_path.display(),
+            system_python.display(),
+            runner_path.display()
+        ),
+    )?;
+    let mut permissions = fs::metadata(&wrapper_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&wrapper_path, permissions)?;
+
+    let _ = fs::remove_file(log_path);
+    Ok(wrapper_path)
+}
+
+#[cfg(unix)]
+fn fake_python_venv_count(log_path: &Path) -> Result<usize, Box<dyn std::error::Error>> {
+    let contents = match fs::read_to_string(log_path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(Box::new(error)),
+    };
+
+    let mut count = 0;
+    for line in contents.lines() {
+        let entry: serde_json::Value = serde_json::from_str(line)?;
+        if entry.get("kind") == Some(&serde_json::Value::String("venv".to_string())) {
+            count += 1;
+        }
+    }
+
+    Ok(count)
+}
+
+fn write_lock_fixture(
+    project_root: &Path,
+    project_name: &str,
+    pinned_python: &str,
+    requires_python: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use sha2::{Digest, Sha256};
+
+    let mut digest = Sha256::new();
+    digest.update(project_name.as_bytes());
+    digest.update(pinned_python.as_bytes());
+    if let Some(requires_python) = requires_python {
+        digest.update(requires_python.as_bytes());
+    }
+    let fingerprint = format!("{:x}", digest.finalize());
+    let target_triple = HostTarget::detect()?.target_triple().to_string();
+
+    let mut lock = String::from("lock-version = \"1.0\"\n");
+    lock.push_str("environments = []\n");
+    if let Some(requires_python) = requires_python {
+        lock.push_str(&format!("requires-python = {:?}\n", requires_python));
+    }
+    lock.push_str("extras = []\n");
+    lock.push_str("dependency-groups = []\n");
+    lock.push_str("default-groups = [\"pyra-default\"]\n");
+    lock.push_str("created-by = \"pyra\"\n\n");
+    lock.push_str("[[packages]]\n");
+    lock.push_str("name = \"fixture\"\n");
+    lock.push_str("version = \"1.0.0\"\n");
+    lock.push_str("index = \"https://pypi.org/simple\"\n\n");
+    lock.push_str("[tool.pyra]\n");
+    lock.push_str(&format!("input-fingerprint = {:?}\n", fingerprint));
+    lock.push_str(&format!("interpreter-version = {:?}\n", pinned_python));
+    lock.push_str(&format!("target-triple = {:?}\n", target_triple));
+    lock.push_str("index-url = \"https://pypi.org/simple\"\n");
+    lock.push_str("resolution-strategy = \"current-platform-union-v1\"\n");
+
+    fs::write(project_root.join("pylock.toml"), lock)?;
     Ok(())
 }
 

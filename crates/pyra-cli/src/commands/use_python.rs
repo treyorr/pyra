@@ -20,7 +20,7 @@ pub async fn execute(args: UseArgs, context: &AppContext) -> Result<Output, Comm
         outcome.environment.python_version
     ))
     .with_detail(format!(
-        "Pinned `{}` in `pyproject.toml` and refreshed the centralized environment.",
+        "Pinned `{}` in `pyproject.toml` and prepared the centralized environment.",
         selected_python.selector
     ))
     .with_verbose_line(format!("root: {}", outcome.project_root))

@@ -45,12 +45,20 @@ impl ProjectEnvironmentStore {
         python: &ProjectPythonSelection,
     ) -> Result<ProjectEnvironmentRecord, ProjectError> {
         let metadata_path = context.paths.project_environment_metadata(&identity.id);
+        let environment_path = context.paths.project_environment_dir(&identity.id);
         if metadata_path.exists() {
             let record = self.read_record(&metadata_path)?;
-            if record.environment_path.exists()
-                && record.python_version == python.installation.version
-                && record.interpreter_path == environment_interpreter_path(&record.environment_path)
-            {
+            if record.matches_interpreter(identity, python, &environment_path) {
+                if record.needs_metadata_refresh(identity, python, &environment_path) {
+                    // `pyra use` can change the pinned selector without changing
+                    // the concrete interpreter. In that case we keep the
+                    // existing environment and only refresh metadata so future
+                    // sync and run commands see aligned project state.
+                    let refreshed = record.refreshed(identity, python, &environment_path);
+                    self.write_record(&metadata_path, &refreshed)?;
+                    return Ok(refreshed);
+                }
+
                 return Ok(record);
             }
         }
@@ -99,19 +107,8 @@ impl ProjectEnvironmentStore {
             now
         };
 
-        let record = ProjectEnvironmentRecord {
-            project_id: identity.id.clone(),
-            project_root: identity.root.clone(),
-            python_selector: python.selector.to_string(),
-            python_version: python.installation.version,
-            // The environment record stores the environment's Python path
-            // because sync and run must act on the centralized environment
-            // itself, not on the base managed interpreter used to create it.
-            interpreter_path: environment_interpreter_path(&environment_path),
-            environment_path: environment_path.clone(),
-            created_at_unix_seconds: created_at,
-            updated_at_unix_seconds: now,
-        };
+        let record =
+            ProjectEnvironmentRecord::new(identity, python, &environment_path, created_at, now);
         self.write_record(&metadata_path, &record)?;
         Ok(record)
     }
@@ -158,6 +155,74 @@ impl ProjectEnvironmentStore {
             })?;
 
         Ok(())
+    }
+}
+
+impl ProjectEnvironmentRecord {
+    fn new(
+        identity: &ProjectIdentity,
+        python: &ProjectPythonSelection,
+        environment_path: &Utf8Path,
+        created_at_unix_seconds: u64,
+        updated_at_unix_seconds: u64,
+    ) -> Self {
+        Self {
+            project_id: identity.id.clone(),
+            project_root: identity.root.clone(),
+            python_selector: python.selector.to_string(),
+            python_version: python.installation.version,
+            // The environment record stores the environment's Python path
+            // because sync and run must act on the centralized environment
+            // itself, not on the base managed interpreter used to create it.
+            interpreter_path: environment_interpreter_path(environment_path),
+            environment_path: environment_path.to_path_buf(),
+            created_at_unix_seconds,
+            updated_at_unix_seconds,
+        }
+    }
+
+    fn matches_interpreter(
+        &self,
+        identity: &ProjectIdentity,
+        python: &ProjectPythonSelection,
+        environment_path: &Utf8Path,
+    ) -> bool {
+        let expected_interpreter = environment_interpreter_path(environment_path);
+        self.project_id == identity.id
+            && self.project_root == identity.root
+            && self.environment_path == environment_path
+            && self.environment_path.exists()
+            && expected_interpreter.exists()
+            && self.python_version == python.installation.version
+            && self.interpreter_path == expected_interpreter
+    }
+
+    fn needs_metadata_refresh(
+        &self,
+        identity: &ProjectIdentity,
+        python: &ProjectPythonSelection,
+        environment_path: &Utf8Path,
+    ) -> bool {
+        self.python_selector != python.selector.to_string()
+            || self.project_id != identity.id
+            || self.project_root != identity.root
+            || self.environment_path != environment_path
+            || self.interpreter_path != environment_interpreter_path(environment_path)
+    }
+
+    fn refreshed(
+        &self,
+        identity: &ProjectIdentity,
+        python: &ProjectPythonSelection,
+        environment_path: &Utf8Path,
+    ) -> Self {
+        Self::new(
+            identity,
+            python,
+            environment_path,
+            self.created_at_unix_seconds,
+            unix_timestamp(),
+        )
     }
 }
 
