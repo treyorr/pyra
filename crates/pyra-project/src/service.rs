@@ -25,7 +25,7 @@ use crate::{
     init::{InitProjectOutcome, create_initial_layout, validate_initial_layout},
     pyproject::{
         DependencyDeclarationScope, add_dependency_requirement, read_python_selector,
-        update_python_selector,
+        remove_dependency_requirement, update_python_selector,
     },
     sync::{
         CURRENT_RESOLUTION_STRATEGY, EnvironmentInstaller, LockArtifact, LockDependencyRef,
@@ -61,6 +61,22 @@ pub struct AddProjectOutcome {
     pub requirement: String,
     pub scope: DependencyDeclarationScope,
     pub manifest_updated: bool,
+    pub sync: SyncProjectOutcome,
+}
+
+/// Request to remove one declared dependency by package name before reusing the
+/// normal sync flow.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct RemoveProjectRequest {
+    pub package: String,
+    pub scope: DependencyDeclarationScope,
+}
+
+/// Outcome for `pyra remove` after the manifest update and follow-on sync.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct RemoveProjectOutcome {
+    pub package: String,
+    pub scope: DependencyDeclarationScope,
     pub sync: SyncProjectOutcome,
 }
 
@@ -180,6 +196,23 @@ impl ProjectService {
             requirement: requirement.to_string(),
             scope: request.scope,
             manifest_updated: mutation.changed,
+            sync,
+        })
+    }
+
+    pub async fn remove(
+        self,
+        context: &AppContext,
+        request: RemoveProjectRequest,
+    ) -> Result<RemoveProjectOutcome, ProjectError> {
+        let project_root = find_project_root(&context.cwd)?;
+        let pyproject_path = project_root.join("pyproject.toml");
+        remove_dependency_requirement(&pyproject_path, &request.scope, &request.package)?;
+        let sync = self.sync(context, SyncProjectRequest::default()).await?;
+
+        Ok(RemoveProjectOutcome {
+            package: request.package,
+            scope: request.scope,
             sync,
         })
     }

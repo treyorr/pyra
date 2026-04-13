@@ -945,6 +945,201 @@ python = "3.13.12"
     assert_eq!(state.get("anyio"), Some(&"4.4.0".to_string()));
 }
 
+#[test]
+fn remove_updates_base_dependencies_in_pyproject_only() {
+    let home = temp_env_root();
+    let index = start_fixture_index();
+    let project_root = home.path().join("workspace").join("sample-remove-base");
+    fs::create_dir_all(&project_root).expect("project root");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        r#"[project]
+name = "sample-remove-base"
+version = "0.1.0"
+requires-python = "==3.13.*"
+dependencies = ["attrs==25.1.0", "httpx==0.27.0"]
+
+[dependency-groups]
+docs = ["httpx==0.27.0"]
+
+[tool.pyra]
+python = "3.13.12"
+"#,
+    )
+    .expect("pyproject");
+
+    seed_managed_install(&home, "3.13.12").expect("managed install");
+    let state_path = home.path().join("installer-state.json");
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .env("PYRA_INDEX_URL", &index.base_url)
+        .args(["remove", "httpx"])
+        .assert()
+        .success()
+        .stdout(contains("Removed `httpx`"))
+        .stdout(contains("[project].dependencies"));
+
+    let pyproject = fs::read_to_string(project_root.join("pyproject.toml")).expect("pyproject");
+    assert!(pyproject.contains("dependencies = [\"attrs==25.1.0\"]"));
+    assert!(pyproject.contains("docs = [\"httpx==0.27.0\"]"));
+}
+
+#[test]
+fn remove_updates_dependency_group_in_pyproject_only() {
+    let home = temp_env_root();
+    let index = start_fixture_index();
+    let project_root = home.path().join("workspace").join("sample-remove-group");
+    fs::create_dir_all(&project_root).expect("project root");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        r#"[project]
+name = "sample-remove-group"
+version = "0.1.0"
+requires-python = "==3.13.*"
+dependencies = ["pytest==8.3.0"]
+
+[dependency-groups]
+dev = ["pytest==8.3.0", "pluggy==1.5.0"]
+
+[tool.pyra]
+python = "3.13.12"
+"#,
+    )
+    .expect("pyproject");
+
+    seed_managed_install(&home, "3.13.12").expect("managed install");
+    let state_path = home.path().join("installer-state.json");
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .env("PYRA_INDEX_URL", &index.base_url)
+        .args(["remove", "pytest", "--group", "dev"])
+        .assert()
+        .success()
+        .stdout(contains("dependency group `dev`"));
+
+    let pyproject = fs::read_to_string(project_root.join("pyproject.toml")).expect("pyproject");
+    assert!(pyproject.contains("dependencies = [\"pytest==8.3.0\"]"));
+    assert_eq!(pyproject.matches("pytest==8.3.0").count(), 1);
+    assert_eq!(pyproject.matches("pluggy==1.5.0").count(), 1);
+}
+
+#[test]
+fn remove_updates_extra_in_pyproject_only() {
+    let home = temp_env_root();
+    let index = start_fixture_index();
+    let project_root = home.path().join("workspace").join("sample-remove-extra");
+    fs::create_dir_all(&project_root).expect("project root");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        r#"[project]
+name = "sample-remove-extra"
+version = "0.1.0"
+requires-python = "==3.13.*"
+dependencies = ["httpx==0.27.0"]
+
+[project.optional-dependencies]
+cli-tools = ["httpx==0.27.0", "attrs==25.1.0"]
+
+[tool.pyra]
+python = "3.13.12"
+"#,
+    )
+    .expect("pyproject");
+
+    seed_managed_install(&home, "3.13.12").expect("managed install");
+    let state_path = home.path().join("installer-state.json");
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .env("PYRA_INDEX_URL", &index.base_url)
+        .args(["remove", "httpx", "--extra", "cli-tools"])
+        .assert()
+        .success()
+        .stdout(contains("extra `cli-tools`"));
+
+    let pyproject = fs::read_to_string(project_root.join("pyproject.toml")).expect("pyproject");
+    assert!(pyproject.contains("dependencies = [\"httpx==0.27.0\"]"));
+    assert_eq!(pyproject.matches("httpx==0.27.0").count(), 1);
+    assert!(pyproject.contains("attrs==25.1.0"));
+}
+
+#[test]
+fn remove_fails_when_dependency_is_missing_from_selected_scope() {
+    let home = temp_env_root();
+    let project_root = home.path().join("workspace").join("sample-remove-missing");
+    fs::create_dir_all(&project_root).expect("project root");
+    let original_pyproject = r#"[project]
+name = "sample-remove-missing"
+version = "0.1.0"
+dependencies = ["attrs==25.1.0"]
+"#;
+    fs::write(project_root.join("pyproject.toml"), original_pyproject).expect("pyproject");
+    let state_path = home.path().join("installer-state.json");
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .args(["remove", "httpx"])
+        .assert()
+        .failure()
+        .stderr(contains("Dependency `httpx` is not declared"))
+        .stderr(contains("[project].dependencies"));
+
+    let pyproject = fs::read_to_string(project_root.join("pyproject.toml")).expect("pyproject");
+    assert_eq!(pyproject, original_pyproject);
+    assert!(!project_root.join("pylock.toml").exists());
+}
+
+#[test]
+fn remove_updates_lockfile_and_cleans_up_environment() {
+    let home = temp_env_root();
+    let index = start_fixture_index();
+    let project_root = home.path().join("workspace").join("sample-remove-sync");
+    fs::create_dir_all(&project_root).expect("project root");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        r#"[project]
+name = "sample-remove-sync"
+version = "0.1.0"
+requires-python = "==3.13.*"
+dependencies = ["attrs==25.1.0", "httpx==0.27.0"]
+
+[tool.pyra]
+python = "3.13.12"
+"#,
+    )
+    .expect("pyproject");
+
+    seed_managed_install(&home, "3.13.12").expect("managed install");
+    let state_path = home.path().join("installer-state.json");
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .env("PYRA_INDEX_URL", &index.base_url)
+        .args(["sync"])
+        .assert()
+        .success();
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .env("PYRA_INDEX_URL", &index.base_url)
+        .args(["remove", "httpx"])
+        .assert()
+        .success()
+        .stdout(contains("reconciled the centralized environment"));
+
+    let lock = fs::read_to_string(project_root.join("pylock.toml")).expect("pylock");
+    assert!(lock.contains("name = \"attrs\""));
+    assert!(!lock.contains("name = \"httpx\""));
+    assert!(!lock.contains("name = \"anyio\""));
+
+    let state = read_state(&state_path);
+    assert_eq!(state.get("attrs"), Some(&"25.1.0".to_string()));
+    assert!(!state.contains_key("httpx"));
+    assert!(!state.contains_key("anyio"));
+}
+
 fn base_command(home: &TempDir, state_path: &Path) -> Command {
     let mut command = Command::cargo_bin("pyra").expect("pyra binary");
     command

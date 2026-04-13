@@ -24,6 +24,8 @@ pub enum Command {
     Use(UseArgs),
     /// Add a dependency declaration to `pyproject.toml` and sync the project.
     Add(AddArgs),
+    /// Remove a dependency declaration from `pyproject.toml` and sync the project.
+    Remove(RemoveArgs),
     /// Reconcile the centralized environment from `pyproject.toml` and `pylock.toml`.
     Sync(SyncArgs),
 }
@@ -85,6 +87,18 @@ pub struct AddArgs {
     #[arg(long, conflicts_with = "extra")]
     pub group: Option<String>,
     /// Add the dependency to a named optional dependency / extra.
+    #[arg(long, conflicts_with = "group")]
+    pub extra: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct RemoveArgs {
+    /// Package name to remove from the selected declaration scope.
+    pub package: String,
+    /// Remove the dependency from a named dependency group.
+    #[arg(long, conflicts_with = "extra")]
+    pub group: Option<String>,
+    /// Remove the dependency from a named optional dependency / extra.
     #[arg(long, conflicts_with = "group")]
     pub extra: Option<String>,
 }

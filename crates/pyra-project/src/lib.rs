@@ -15,7 +15,8 @@ pub use pyproject::{
 };
 pub use service::{
     AddProjectOutcome, AddProjectRequest, InitProjectRequest, InitProjectWithPythonOutcome,
-    ProjectService, UseProjectPythonOutcome, UseProjectPythonRequest,
+    ProjectService, RemoveProjectOutcome, RemoveProjectRequest, UseProjectPythonOutcome,
+    UseProjectPythonRequest,
 };
 pub use service::{SyncLockMode, SyncProjectOutcome, SyncProjectRequest};
 pub use sync::SyncSelectionRequest;

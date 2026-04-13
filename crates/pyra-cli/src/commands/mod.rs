@@ -2,6 +2,7 @@ mod add;
 mod init;
 mod project_python;
 mod python;
+mod remove;
 mod sync;
 mod use_python;
 
@@ -12,7 +13,7 @@ use pyra_python::PythonError;
 use pyra_ui::Output;
 use thiserror::Error;
 
-use crate::cli::{AddArgs, Command, InitArgs, PythonArgs, SyncArgs, UseArgs};
+use crate::cli::{AddArgs, Command, InitArgs, PythonArgs, RemoveArgs, SyncArgs, UseArgs};
 
 #[derive(Debug, Error)]
 pub enum CommandError {
@@ -37,6 +38,7 @@ pub async fn execute(command: Command, context: &AppContext) -> Result<Output, C
         Command::Init(args) => execute_init(args, context).await,
         Command::Use(args) => execute_use(args, context).await,
         Command::Add(args) => execute_add(args, context).await,
+        Command::Remove(args) => execute_remove(args, context).await,
         Command::Sync(args) => execute_sync(args, context).await,
     }
 }
@@ -55,6 +57,10 @@ async fn execute_use(args: UseArgs, context: &AppContext) -> Result<Output, Comm
 
 async fn execute_add(args: AddArgs, context: &AppContext) -> Result<Output, CommandError> {
     add::execute(args, context).await
+}
+
+async fn execute_remove(args: RemoveArgs, context: &AppContext) -> Result<Output, CommandError> {
+    remove::execute(args, context).await
 }
 
 async fn execute_sync(args: SyncArgs, context: &AppContext) -> Result<Output, CommandError> {
