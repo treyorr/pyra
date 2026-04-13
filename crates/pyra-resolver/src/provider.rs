@@ -1,15 +1,19 @@
 //! In-memory PubGrub graph assembly.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::fmt::Display;
 use std::str::FromStr;
 
 use pep440_rs::Version;
 use pep508_rs::{ExtraName, Requirement, VerbatimUrl, VersionOrUrl};
-use pubgrub::{Map, OfflineDependencyProvider, Ranges, resolve};
+use pubgrub::{
+    DefaultStringReporter, DerivationTree, External, Map, OfflineDependencyProvider, PubGrubError,
+    Ranges, Reporter, resolve,
+};
 
 use crate::{
     ResolutionRequest, ResolutionRootToken, ResolutionRootTokenKind, ResolvedPackage,
-    ResolverEnvironment, ResolverError,
+    ResolverConflict, ResolverEnvironment, ResolverError,
     simple::{SimpleCandidate, fetch_candidates},
     version::requirement_to_range,
 };
@@ -40,12 +44,143 @@ pub async fn resolve_request(
     let catalog = build_catalog(client, &request).await?;
     let provider = build_provider(&request, &catalog)?;
     let root_version = Version::from_str("0").expect("synthetic root version");
-    let solution = resolve(&provider, PackageKey::Root, root_version).map_err(|error| {
-        ResolverError::Solve {
-            detail: error.to_string(),
-        }
-    })?;
+    let solution = resolve(&provider, PackageKey::Root, root_version).map_err(resolve_error)?;
     collapse_solution(&request, &catalog, solution)
+}
+
+fn resolve_error(
+    error: PubGrubError<OfflineDependencyProvider<PackageKey, Ranges<Version>>>,
+) -> ResolverError {
+    match error {
+        PubGrubError::NoSolution(mut tree) => {
+            // Pyra's fixture corpus uses a complete local index view, so merging
+            // away no-version leaves keeps the user-facing explanation focused on
+            // the incompatible constraints that actually matter.
+            tree.collapse_no_versions();
+            let report = DefaultStringReporter::report(&tree);
+            let summary = summarize_conflict(&tree).unwrap_or_else(|| {
+                report
+                    .lines()
+                    .next()
+                    .unwrap_or("the selected requirements are incompatible")
+                    .to_string()
+            });
+            ResolverError::Solve {
+                detail: report.clone(),
+                conflict: Some(ResolverConflict { summary, report }),
+            }
+        }
+        other => ResolverError::Solve {
+            detail: other.to_string(),
+            conflict: None,
+        },
+    }
+}
+
+fn summarize_conflict(
+    tree: &DerivationTree<PackageKey, Ranges<Version>, String>,
+) -> Option<String> {
+    let mut edges = Vec::new();
+    collect_conflict_edges(tree, &mut edges);
+
+    let mut seen = BTreeSet::new();
+    let mut deduped = Vec::new();
+    for edge in edges {
+        let key = (
+            edge.depender.clone(),
+            edge.dependency.clone(),
+            edge.requirement.clone(),
+        );
+        if seen.insert(key) {
+            deduped.push(edge);
+        }
+    }
+
+    for dependency in deduped.iter().map(|edge| edge.dependency.clone()) {
+        let mut matching = deduped
+            .iter()
+            .filter(|edge| edge.dependency == dependency)
+            .collect::<Vec<_>>();
+        if matching.len() >= 2 {
+            matching.sort_by(|left, right| {
+                left.depender
+                    .cmp(&right.depender)
+                    .then(left.requirement.cmp(&right.requirement))
+            });
+            return Some(format!(
+                "{} requires {} {}, but {} requires {} {}.",
+                matching[0].depender,
+                matching[0].dependency,
+                matching[0].requirement,
+                matching[1].depender,
+                matching[1].dependency,
+                matching[1].requirement,
+            ));
+        }
+    }
+
+    deduped.first().map(|edge| {
+        format!(
+            "{} requires {} {}, but that requirement could not be satisfied.",
+            edge.depender, edge.dependency, edge.requirement
+        )
+    })
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
+struct ConflictEdge {
+    depender: String,
+    dependency: String,
+    requirement: String,
+}
+
+fn collect_conflict_edges(
+    tree: &DerivationTree<PackageKey, Ranges<Version>, String>,
+    edges: &mut Vec<ConflictEdge>,
+) {
+    match tree {
+        DerivationTree::External(External::FromDependencyOf(
+            depender,
+            _depender_versions,
+            dependency,
+            requirement,
+        )) => {
+            let Some(depender) = conflict_package_label(depender) else {
+                return;
+            };
+            let Some(dependency) = conflict_package_label(dependency) else {
+                return;
+            };
+            edges.push(ConflictEdge {
+                depender,
+                dependency,
+                requirement: format_range(requirement),
+            });
+        }
+        DerivationTree::Derived(derived) => {
+            collect_conflict_edges(&derived.cause1, edges);
+            collect_conflict_edges(&derived.cause2, edges);
+        }
+        DerivationTree::External(_) => {}
+    }
+}
+
+fn conflict_package_label(package: &PackageKey) -> Option<String> {
+    match package {
+        PackageKey::Base(name) => Some(format!("`{name}`")),
+        PackageKey::Variant { name, extras } => Some(format!("`{}[{}]`", name, extras.join(","))),
+        PackageKey::Token(token) => Some(match token.kind {
+            ResolutionRootTokenKind::DependencyGroup => {
+                format!("dependency group `{}`", token.name)
+            }
+            ResolutionRootTokenKind::Extra => format!("extra `{}`", token.name),
+        }),
+        PackageKey::Root => None,
+    }
+}
+
+fn format_range(range: &impl Display) -> String {
+    format!("`{range}`")
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
@@ -532,7 +667,59 @@ mod tests {
             .await
             .expect_err("conflict");
 
-        assert!(matches!(error, ResolverError::Solve { .. }));
+        match error {
+            ResolverError::Solve {
+                conflict: Some(conflict),
+                ..
+            } => {
+                assert_eq!(
+                    conflict.summary,
+                    "`alpha` requires `shared` `<2`, but `bravo` requires `shared` `>=2`."
+                );
+                assert!(conflict.report.contains("alpha"));
+                assert!(conflict.report.contains("bravo"));
+                assert!(conflict.report.contains("shared"));
+            }
+            other => panic!("unexpected resolver error: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn reports_conflicts_between_group_and_extra_roots() {
+        let harness = ResolverFixtureHarness::new().expect("fixture harness");
+        harness
+            .add_package(
+                PackageFixture::new("shared").with_artifact(ArtifactFixture::wheel("1.5.0")),
+            )
+            .expect("shared v1 fixture");
+        harness
+            .add_package(
+                PackageFixture::new("shared").with_artifact(ArtifactFixture::wheel("2.0.0")),
+            )
+            .expect("shared v2 fixture");
+
+        let error = harness
+            .resolve_roots(vec![
+                FixtureRoot::new(
+                    ResolutionRootTokenKind::DependencyGroup,
+                    "pyra-default",
+                    &["shared<2"],
+                ),
+                FixtureRoot::new(ResolutionRootTokenKind::Extra, "http2", &["shared>=2"]),
+            ])
+            .await
+            .expect_err("conflict");
+
+        match error {
+            ResolverError::Solve {
+                conflict: Some(conflict),
+                ..
+            } => assert_eq!(
+                conflict.summary,
+                "dependency group `pyra-default` requires `shared` `<2`, but extra `http2` requires `shared` `>=2`."
+            ),
+            other => panic!("unexpected resolver error: {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -637,6 +824,62 @@ mod tests {
                 .iter()
                 .all(|artifact| artifact.name.ends_with(".tar.gz"))
         );
+    }
+
+    #[tokio::test]
+    async fn keeps_multiple_compatible_wheel_choices_for_one_version() {
+        let harness = ResolverFixtureHarness::new().expect("fixture harness");
+        harness
+            .add_package(
+                PackageFixture::new("multiwheel")
+                    .with_artifact(ArtifactFixture::wheel("1.0.0"))
+                    .with_artifact(ArtifactFixture::wheel_with_tags(
+                        "1.0.0",
+                        "cp313",
+                        "abi3",
+                        "manylinux_2_17_x86_64",
+                    ))
+                    .with_artifact(ArtifactFixture::sdist("1.0.0")),
+            )
+            .expect("multiwheel fixture");
+
+        let resolved = harness.resolve(&["multiwheel"]).await.expect("resolution");
+        let multiwheel = package(&resolved, "multiwheel");
+
+        assert_eq!(multiwheel.artifacts.len(), 2);
+        assert!(
+            multiwheel
+                .artifacts
+                .iter()
+                .all(|artifact| artifact.kind == ArtifactKind::Wheel)
+        );
+    }
+
+    #[tokio::test]
+    async fn resolves_sdist_only_package_from_local_fixture() {
+        let harness = ResolverFixtureHarness::new().expect("fixture harness");
+        harness
+            .add_package(
+                PackageFixture::new("sdistonly")
+                    .with_artifact(ArtifactFixture::sdist("1.2.3").with_dependency("shared>=1")),
+            )
+            .expect("sdistonly fixture");
+        harness
+            .add_package(
+                PackageFixture::new("shared").with_artifact(ArtifactFixture::wheel("1.5.0")),
+            )
+            .expect("shared fixture");
+
+        let resolved = harness.resolve(&["sdistonly"]).await.expect("resolution");
+        let package = package(&resolved, "sdistonly");
+
+        assert!(
+            package
+                .artifacts
+                .iter()
+                .all(|artifact| artifact.kind == ArtifactKind::Sdist)
+        );
+        assert_eq!(package.dependencies[0].name, "shared");
     }
 
     #[tokio::test]

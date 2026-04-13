@@ -757,6 +757,46 @@ python = "3.13.12"
 }
 
 #[test]
+fn sync_renders_conflicts_with_the_incompatible_constraints() {
+    let home = temp_env_root();
+    let index = start_conflict_fixture_index();
+    let project_root = home.path().join("workspace").join("sample-sync-conflict");
+    fs::create_dir_all(&project_root).expect("project root");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        r#"[project]
+name = "sample-sync-conflict"
+version = "0.1.0"
+requires-python = "==3.13.*"
+dependencies = ["alpha", "bravo"]
+
+[tool.pyra]
+python = "3.13.12"
+"#,
+    )
+    .expect("pyproject");
+    seed_managed_install(&home, "3.13.12").expect("managed install");
+    let state_path = home.path().join("installer-state.json");
+
+    let output = base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .env("PYRA_INDEX_URL", &index.base_url)
+        .args(["sync"])
+        .output()
+        .expect("sync output");
+
+    assert!(!output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        concat!(
+            "error: Pyra could not resolve a compatible dependency set.\n",
+            "`alpha` requires `shared` `<2`, but `bravo` requires `shared` `>=2`.\n",
+            "next: Adjust the declared dependency constraints and retry.\n",
+        )
+    );
+}
+
+#[test]
 fn sync_fails_for_invalid_dependency_group_config() {
     let home = temp_env_root();
     let project_root = home
@@ -1515,6 +1555,46 @@ fn start_fixture_index() -> FixtureIndex {
     }
 }
 
+fn start_conflict_fixture_index() -> FixtureIndex {
+    let root = tempfile::tempdir().expect("fixture root");
+    for file in [
+        "alpha-1.0.0-py3-none-any.whl",
+        "bravo-1.0.0-py3-none-any.whl",
+        "shared-1.5.0-py3-none-any.whl",
+        "shared-2.0.0-py3-none-any.whl",
+    ] {
+        write_fixture_bytes(
+            root.path(),
+            &format!("files/{file}"),
+            &fixture_artifact_bytes(file),
+        );
+    }
+    for package in ["alpha", "bravo", "shared"] {
+        write_fixture_file(
+            root.path(),
+            &format!("{package}.json"),
+            conflict_fixture_project_json(package, root.path()),
+        );
+    }
+    for metadata in [
+        "alpha-1.0.0-py3-none-any.whl.metadata",
+        "bravo-1.0.0-py3-none-any.whl.metadata",
+        "shared-1.5.0-py3-none-any.whl.metadata",
+        "shared-2.0.0-py3-none-any.whl.metadata",
+    ] {
+        write_fixture_file(
+            root.path(),
+            &format!("files/{metadata}"),
+            fixture_metadata(metadata),
+        );
+    }
+
+    FixtureIndex {
+        base_url: format!("file://{}", root.path().to_string_lossy()),
+        _root: root,
+    }
+}
+
 fn start_installable_fixture_index(
     package: &str,
     version: &str,
@@ -1595,6 +1675,27 @@ fn fixture_project_json(package: &str, root: &Path) -> String {
     .to_string()
 }
 
+fn conflict_fixture_project_json(package: &str, root: &Path) -> String {
+    let files = match package {
+        "alpha" => vec!["alpha-1.0.0-py3-none-any.whl"],
+        "bravo" => vec!["bravo-1.0.0-py3-none-any.whl"],
+        "shared" => vec![
+            "shared-1.5.0-py3-none-any.whl",
+            "shared-2.0.0-py3-none-any.whl",
+        ],
+        other => panic!("unexpected conflict package {other}"),
+    };
+    serde_json::json!({
+        "files": files.into_iter().map(|file| serde_json::json!({
+            "filename": file,
+            "url": format!("file://{}", root.join("files").join(file).display()),
+            "hashes": {"sha256": format!("{:x}", Sha256::digest(&fixture_artifact_bytes(file)))},
+            "core-metadata": true
+        })).collect::<Vec<_>>()
+    })
+    .to_string()
+}
+
 fn fixture_artifact_bytes(filename: &str) -> Vec<u8> {
     format!("pyra fixture artifact: {filename}\n").into_bytes()
 }
@@ -1626,6 +1727,20 @@ fn fixture_metadata(filename: &str) -> String {
         }
         "anyio-4.4.0-py3-none-any.whl.metadata" => {
             "Metadata-Version: 2.3\nName: anyio\nVersion: 4.4.0\n".to_string()
+        }
+        "alpha-1.0.0-py3-none-any.whl.metadata" => {
+            "Metadata-Version: 2.3\nName: alpha\nVersion: 1.0.0\nRequires-Dist: shared<2\n"
+                .to_string()
+        }
+        "bravo-1.0.0-py3-none-any.whl.metadata" => {
+            "Metadata-Version: 2.3\nName: bravo\nVersion: 1.0.0\nRequires-Dist: shared>=2\n"
+                .to_string()
+        }
+        "shared-1.5.0-py3-none-any.whl.metadata" => {
+            "Metadata-Version: 2.3\nName: shared\nVersion: 1.5.0\n".to_string()
+        }
+        "shared-2.0.0-py3-none-any.whl.metadata" => {
+            "Metadata-Version: 2.3\nName: shared\nVersion: 2.0.0\n".to_string()
         }
         other => panic!("unexpected metadata request {other}"),
     }

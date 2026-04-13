@@ -13,7 +13,7 @@ mod simple;
 mod test_support;
 mod version;
 
-pub use error::ResolverError;
+pub use error::{ResolverConflict, ResolverError};
 pub use marker::ResolverEnvironment;
 pub use model::{
     ArtifactKind, ArtifactRecord, PackageDependencyRecord, ResolutionRequest, ResolutionRoot,

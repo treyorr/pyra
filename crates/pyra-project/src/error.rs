@@ -552,9 +552,13 @@ impl UserFacingError for ProjectError {
                 ErrorKind::User,
                 "Pyra could not resolve a compatible dependency set.",
             )
-            .with_detail("The project dependency inputs could not be locked for the selected interpreter and current platform.")
+            .with_detail(
+                source.conflict_summary().unwrap_or(
+                    "The project dependency inputs could not be locked for the selected interpreter and current platform.",
+                ),
+            )
             .with_suggestion("Adjust the declared dependency constraints and retry.")
-            .with_verbose_detail(source.to_string()),
+            .with_verbose_detail(source.verbose_detail()),
             Self::InspectEnvironment {
                 interpreter,
                 detail,
