@@ -107,4 +107,6 @@ The installer:
 
 In this slice, Pyra uses `python -m pip install --no-deps` and
 `python -m pip uninstall` behind an installer boundary. pip applies artifacts,
-but Pyra owns dependency resolution and desired state.
+but Pyra owns dependency resolution and desired state. When the lock selects an
+artifact, the installer verifies it against the lock hash and may reuse a
+previously verified local cache entry on later syncs.

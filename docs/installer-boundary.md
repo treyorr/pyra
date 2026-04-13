@@ -47,6 +47,7 @@ The installer owns:
 - Comparing installed state with the selected lock subset.
 - Planning exact install and removal actions.
 - Applying those actions to the environment.
+- Downloading, verifying, caching, and reusing locked package artifacts.
 - Installing the current project editable when appropriate.
 
 The installer does not:

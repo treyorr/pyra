@@ -49,6 +49,8 @@ Then read the more specific docs that apply to the task:
   The end-to-end dependency pipeline for `pyra sync`.
 - `docs/lock-format-notes.md`
   What Pyra means by `pylock.toml` today.
+- `docs/package-cache-model.md`
+  How Pyra reuses verified package artifacts without changing lock authority.
 - `docs/resolution-scope.md`
   What the resolver currently supports and what it intentionally does not.
 - `docs/installer-boundary.md`

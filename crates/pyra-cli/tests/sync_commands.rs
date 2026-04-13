@@ -248,6 +248,75 @@ python = "3.13.12"
 }
 
 #[test]
+fn sync_reuses_verified_artifact_cache_for_warm_reinstall() {
+    let home = temp_env_root();
+    let package_name = "cachedemo";
+    let package_version = "0.1.0";
+    let index =
+        start_installable_fixture_index(package_name, package_version).expect("installable index");
+    let project_root = home.path().join("workspace").join("sample-sync-warm-cache");
+    fs::create_dir_all(&project_root).expect("project root");
+    let python_version = system_python_version().expect("system python version");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        format!(
+            r#"[project]
+name = "sample-sync-warm-cache"
+version = "0.1.0"
+requires-python = "{requires_python}"
+dependencies = ["{package_name}=={package_version}"]
+
+[tool.pyra]
+python = "{python_version}"
+"#,
+            requires_python = requires_python_series(&python_version),
+        ),
+    )
+    .expect("pyproject");
+
+    let managed_env = home.path().join("managed-python");
+    create_virtualenv(&system_python().expect("system python"), &managed_env)
+        .expect("managed virtualenv");
+    let managed_python = venv_python_path(&managed_env);
+    seed_managed_install_with_executable(&home, &python_version, &managed_python)
+        .expect("managed install");
+
+    let state_path = home.path().join("unused-installer-state.json");
+    base_command(&home, &state_path)
+        .env_remove("PYRA_SYNC_INSTALLER_STATE_PATH")
+        .env("PYRA_INDEX_URL", &index.base_url)
+        .current_dir(&project_root)
+        .args(["sync"])
+        .assert()
+        .success()
+        .stdout(contains("Synced"));
+
+    let cached_artifact = home
+        .path()
+        .join("cache")
+        .join("artifacts")
+        .join("verified")
+        .join(&index.artifact_sha256)
+        .join(&index.artifact_name);
+    assert!(cached_artifact.exists());
+
+    fs::remove_dir_all(home.path().join("data").join("environments")).expect("remove environments");
+    fs::remove_file(&index.artifact_path).expect("remove source artifact");
+    assert!(!index.artifact_path.exists());
+
+    base_command(&home, &state_path)
+        .env_remove("PYRA_SYNC_INSTALLER_STATE_PATH")
+        .env("PYRA_INDEX_URL", &index.base_url)
+        .current_dir(&project_root)
+        .args(["sync"])
+        .assert()
+        .success()
+        .stdout(contains("Reused the current lock"));
+
+    assert!(cached_artifact.exists());
+}
+
+#[test]
 fn sync_reuses_fresh_lock_when_freshness_inputs_are_unchanged() {
     let home = temp_env_root();
     let index = start_fixture_index();
@@ -1222,6 +1291,13 @@ fn system_python_version() -> Result<String, Box<dyn std::error::Error>> {
     Ok(String::from_utf8(output.stdout)?.trim().to_string())
 }
 
+fn requires_python_series(version: &str) -> String {
+    let mut parts = version.split('.');
+    let major = parts.next().expect("python major version");
+    let minor = parts.next().expect("python minor version");
+    format!("=={major}.{minor}.*")
+}
+
 fn create_virtualenv(interpreter: &Path, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let output = ProcessCommand::new(interpreter)
         .args(["-m", "venv"])
@@ -1348,6 +1424,14 @@ struct FixtureIndex {
     _root: TempDir,
 }
 
+struct InstallableFixtureIndex {
+    base_url: String,
+    artifact_path: PathBuf,
+    artifact_name: String,
+    artifact_sha256: String,
+    _root: TempDir,
+}
+
 fn start_fixture_index() -> FixtureIndex {
     let root = tempfile::tempdir().expect("fixture root");
     for file in [
@@ -1431,6 +1515,49 @@ fn start_fixture_index() -> FixtureIndex {
     }
 }
 
+fn start_installable_fixture_index(
+    package: &str,
+    version: &str,
+) -> Result<InstallableFixtureIndex, Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let files_dir = root.path().join("files");
+    fs::create_dir_all(&files_dir)?;
+    let artifact_path = build_installable_wheel(&files_dir, package, version)?;
+    let artifact_name = artifact_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or("installable artifact name must be valid utf-8")?
+        .to_string();
+    let artifact_sha256 = format!("{:x}", Sha256::digest(fs::read(&artifact_path)?));
+
+    write_fixture_file(
+        root.path(),
+        &format!("{package}.json"),
+        serde_json::json!({
+            "files": [{
+                "filename": artifact_name,
+                "url": format!("file://{}", artifact_path.display()),
+                "hashes": {"sha256": artifact_sha256},
+                "core-metadata": true
+            }]
+        })
+        .to_string(),
+    );
+    write_fixture_file(
+        root.path(),
+        &format!("files/{artifact_name}.metadata"),
+        installable_fixture_metadata(package, version),
+    );
+
+    Ok(InstallableFixtureIndex {
+        base_url: format!("file://{}", root.path().to_string_lossy()),
+        artifact_path,
+        artifact_name,
+        artifact_sha256,
+        _root: root,
+    })
+}
+
 fn write_fixture_file(root: &Path, relative: &str, contents: String) {
     let path = root.join(relative);
     if let Some(parent) = path.parent() {
@@ -1472,6 +1599,12 @@ fn fixture_artifact_bytes(filename: &str) -> Vec<u8> {
     format!("pyra fixture artifact: {filename}\n").into_bytes()
 }
 
+fn installable_fixture_metadata(package: &str, version: &str) -> String {
+    format!(
+        "Metadata-Version: 2.1\nName: {package}\nVersion: {version}\nSummary: Pyra installable fixture\n"
+    )
+}
+
 fn fixture_metadata(filename: &str) -> String {
     match filename {
         "attrs-25.1.0-py3-none-any.whl.metadata" => {
@@ -1496,4 +1629,78 @@ fn fixture_metadata(filename: &str) -> String {
         }
         other => panic!("unexpected metadata request {other}"),
     }
+}
+
+fn build_installable_wheel(
+    output_dir: &Path,
+    package: &str,
+    version: &str,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let script = r#"
+import base64
+import hashlib
+import pathlib
+import sys
+import zipfile
+
+output_dir = pathlib.Path(sys.argv[1])
+package = sys.argv[2]
+version = sys.argv[3]
+dist = package.replace("-", "_")
+dist_info = f"{dist}-{version}.dist-info"
+wheel_name = f"{dist}-{version}-py3-none-any.whl"
+wheel_path = output_dir / wheel_name
+
+metadata = (
+    f"Metadata-Version: 2.1\n"
+    f"Name: {package}\n"
+    f"Version: {version}\n"
+    f"Summary: Pyra installable fixture\n"
+)
+wheel = (
+    "Wheel-Version: 1.0\n"
+    "Generator: pyra integration test\n"
+    "Root-Is-Purelib: true\n"
+    "Tag: py3-none-any\n"
+)
+module_init = f"__version__ = '{version}'\n"
+
+records = []
+
+def encode_record(data):
+    digest = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode("ascii")
+    return f"sha256={digest}", str(len(data))
+
+with zipfile.ZipFile(wheel_path, "w", compression=zipfile.ZIP_DEFLATED) as wheel_file:
+    def write_file(path, data):
+        wheel_file.writestr(path, data)
+        records.append((path, *encode_record(data)))
+
+    write_file(f"{dist}/__init__.py", module_init.encode("utf-8"))
+    write_file(f"{dist_info}/METADATA", metadata.encode("utf-8"))
+    write_file(f"{dist_info}/WHEEL", wheel.encode("utf-8"))
+    record_path = f"{dist_info}/RECORD"
+    record_body = "".join(
+        f"{path},{digest},{size}\n" for path, digest, size in records
+    ) + f"{record_path},,\n"
+    wheel_file.writestr(record_path, record_body.encode("utf-8"))
+
+print(wheel_path)
+"#;
+
+    let output = ProcessCommand::new(system_python()?)
+        .args(["-c", script])
+        .arg(output_dir)
+        .arg(package)
+        .arg(version)
+        .output()?;
+    if !output.status.success() {
+        return Err(format!(
+            "failed to build installable wheel fixture: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
+        .into());
+    }
+
+    Ok(PathBuf::from(String::from_utf8(output.stdout)?.trim()))
 }

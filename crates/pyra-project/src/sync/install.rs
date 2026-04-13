@@ -287,6 +287,9 @@ async fn prepare_verified_artifact(
         .parent()
         .expect("artifact cache file should have a parent");
     ensure_artifact_dir(cached_parent)?;
+    // The persistent artifact cache is purely a performance layer. Even cache
+    // hits are re-hashed against the lock so stale or corrupted entries are
+    // discarded instead of silently trusted.
     if cached_path.exists() && file_matches_sha256(&cached_path, &artifact.sha256)? {
         return Ok(cached_path);
     }
@@ -598,7 +601,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stages_verified_artifact_with_matching_hash() {
+    async fn caches_verified_artifact_on_cache_miss() {
         let temp = tempdir().expect("temporary directory");
         let source_path = temp.path().join("attrs-25.1.0-py3-none-any.whl");
         let bytes = b"attrs wheel fixture bytes";
@@ -621,6 +624,67 @@ mod tests {
         );
         assert_eq!(
             fs::read(prepared.as_std_path()).expect("cached artifact"),
+            bytes
+        );
+        assert!(staging_dir_entries(&paths).is_empty());
+    }
+
+    #[tokio::test]
+    async fn reuses_verified_artifact_on_cache_hit_without_source_download() {
+        let temp = tempdir().expect("temporary directory");
+        let source_path = temp.path().join("attrs-25.1.0-py3-none-any.whl");
+        let bytes = b"attrs wheel fixture bytes";
+        fs::write(&source_path, bytes).expect("artifact bytes");
+        let paths = test_paths(temp.path());
+        let artifact = artifact(
+            source_path.as_path(),
+            sha256_hex(bytes),
+            "attrs-25.1.0-py3-none-any.whl",
+        );
+        let package = package_with_artifact("attrs", artifact.clone());
+
+        let first = prepare_verified_artifact(&paths, &package, &artifact)
+            .await
+            .expect("first verified artifact");
+        fs::remove_file(&source_path).expect("remove original source");
+
+        let second = prepare_verified_artifact(&paths, &package, &artifact)
+            .await
+            .expect("cache hit should avoid source download");
+
+        assert_eq!(first, second);
+        assert_eq!(
+            fs::read(second.as_std_path()).expect("cached artifact"),
+            bytes
+        );
+        assert!(staging_dir_entries(&paths).is_empty());
+    }
+
+    #[tokio::test]
+    async fn discards_corrupted_cached_artifact_and_recaches_verified_bytes() {
+        let temp = tempdir().expect("temporary directory");
+        let source_path = temp.path().join("attrs-25.1.0-py3-none-any.whl");
+        let bytes = b"attrs wheel fixture bytes";
+        fs::write(&source_path, bytes).expect("artifact bytes");
+        let paths = test_paths(temp.path());
+        let artifact = artifact(
+            source_path.as_path(),
+            sha256_hex(bytes),
+            "attrs-25.1.0-py3-none-any.whl",
+        );
+        let package = package_with_artifact("attrs", artifact.clone());
+        let cached_path = paths.package_artifact_cache_file(&artifact.sha256, &artifact.name);
+        let cached_parent = cached_path.parent().expect("cached artifact parent");
+        fs::create_dir_all(cached_parent).expect("cache parent");
+        fs::write(&cached_path, b"corrupted bytes").expect("corrupted cache contents");
+
+        let prepared = prepare_verified_artifact(&paths, &package, &artifact)
+            .await
+            .expect("corrupted cache entry should be replaced");
+
+        assert_eq!(prepared, cached_path);
+        assert_eq!(
+            fs::read(prepared.as_std_path()).expect("recached artifact"),
             bytes
         );
         assert!(staging_dir_entries(&paths).is_empty());
@@ -716,15 +780,22 @@ mod tests {
     }
 
     fn staging_dir_entries(paths: &AppPaths) -> Vec<String> {
-        fs::read_dir(paths.package_artifact_staging_dir().as_std_path())
-            .expect("staging dir")
-            .map(|entry| {
-                entry
-                    .expect("staging entry")
-                    .file_name()
-                    .to_string_lossy()
-                    .to_string()
-            })
-            .collect()
+        let mut entries = Vec::new();
+        let mut pending = vec![paths.package_artifact_staging_dir()];
+
+        while let Some(dir) = pending.pop() {
+            for entry in fs::read_dir(dir.as_std_path()).expect("staging dir") {
+                let entry = entry.expect("staging entry");
+                let path = Utf8PathBuf::from_path_buf(entry.path()).expect("utf-8 staging path");
+                if path.is_dir() {
+                    pending.push(path);
+                    continue;
+                }
+
+                entries.push(path.to_string());
+            }
+        }
+
+        entries
     }
 }
