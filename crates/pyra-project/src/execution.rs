@@ -84,12 +84,12 @@ else:
     orig_argv = [_normalize(token) for token in getattr(sys, "orig_argv", [])]
     subcommand = _pip_subcommand(argv, orig_argv)
     if subcommand in MUTATING_PIP_COMMANDS:
-        print(
+        sys.stderr.write(
             "Pyra blocked ad hoc pip mutation during `pyra run`. "
-            "Use `pyra add`/`pyra remove` and `pyra sync` instead.",
-            file=sys.stderr,
+            "Use `pyra add`/`pyra remove` and `pyra sync` instead.\n"
         )
-        raise SystemExit(86)
+        sys.stderr.flush()
+        os._exit(86)
 "#;
 
 /// Request to execute one project target through the synchronized centralized

@@ -239,7 +239,7 @@ python = "{python_version}"
 
     seed_managed_install(&home, &python_version).expect("managed install");
 
-    base_command(&home)
+    let nested_install = base_command(&home)
         .current_dir(&project_root)
         .args([
             "run",
@@ -248,8 +248,21 @@ python = "{python_version}"
             "import subprocess, sys; subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'attrs==25.1.0'])",
         ])
         .assert()
-        .failure()
-        .stderr(contains("blocked ad hoc pip mutation during `pyra run`"));
+        .failure();
+    let nested_install_stderr = String::from_utf8_lossy(&nested_install.get_output().stderr);
+    assert!(nested_install_stderr.contains("blocked ad hoc pip mutation during `pyra run`"));
+    assert!(!nested_install_stderr.contains("Fatal Python error"));
+    assert!(!nested_install_stderr.contains("sitecustomize"));
+
+    let direct_install = base_command(&home)
+        .current_dir(&project_root)
+        .args(["run", "pip", "install", "attrs==25.1.0"])
+        .assert()
+        .failure();
+    let direct_install_stderr = String::from_utf8_lossy(&direct_install.get_output().stderr);
+    assert!(direct_install_stderr.contains("blocked ad hoc pip mutation during `pyra run`"));
+    assert!(!direct_install_stderr.contains("Fatal Python error"));
+    assert!(!direct_install_stderr.contains("sitecustomize"));
 
     base_command(&home)
         .current_dir(&project_root)
