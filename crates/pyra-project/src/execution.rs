@@ -1,15 +1,25 @@
-//! Project execution helpers for `pyra run`.
+//! Reusable project execution helpers.
 //!
-//! This module keeps lookup and subprocess execution out of the CLI crate while
-//! still reusing the sync-owned centralized environment model.
+//! `pyra run` and later runtime commands must all build on the same
+//! sync-owned environment contract. This module owns the execution context
+//! assembly that happens after command orchestration has decided to execute a
+//! project target: sync-before-exec, managed interpreter selection,
+//! centralized environment lookup, documented target resolution, and child
+//! process launch.
 
 use std::fs;
 use std::process::{Command, ExitStatus};
 
+use pyra_core::AppContext;
+
+use crate::{
+    ProjectError,
+    environment::{ProjectEnvironmentRecord, ProjectEnvironmentStore, ProjectPythonSelection},
+    service::{ProjectService, SyncProjectOutcome, SyncProjectRequest, selected_installation},
+    sync::ProjectSyncInputLoader,
+};
 use camino::{Utf8Path, Utf8PathBuf};
 use toml_edit::{DocumentMut, Item};
-
-use crate::ProjectError;
 
 const PROJECT_SCRIPT_RUNNER: &str = r#"
 import importlib
@@ -29,6 +39,32 @@ result = target()
 raise SystemExit(0 if result is None else result)
 "#;
 
+/// Request to execute one project target through the synchronized centralized
+/// environment.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct ProjectExecutionRequest {
+    pub target: String,
+}
+
+/// Outcome for one execution request.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct ProjectExecutionOutcome {
+    pub exit_code: i32,
+}
+
+/// Shared execution entrypoint used by `pyra run` and future runtime
+/// commands. Keeping this service in the project crate prevents the CLI layer
+/// from reimplementing project discovery, sync, or environment rules.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct ProjectExecutionService;
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct ProjectExecutionContext {
+    project_root: Utf8PathBuf,
+    environment: ProjectEnvironmentRecord,
+    plan: ProjectExecutionPlan,
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ProjectExecutionPlan {
     target: ResolvedRunTarget,
@@ -47,6 +83,65 @@ enum ResolvedRunTarget {
     PythonFile {
         script_path: Utf8PathBuf,
     },
+}
+
+impl ProjectExecutionService {
+    pub(crate) async fn execute(
+        self,
+        context: &AppContext,
+        request: ProjectExecutionRequest,
+    ) -> Result<ProjectExecutionOutcome, ProjectError> {
+        // Execution must always build on the same sync pipeline as normal
+        // package management, so runtime commands never grow a separate
+        // environment path.
+        let sync = ProjectService
+            .sync(context, SyncProjectRequest::default())
+            .await?;
+        let execution = self.assemble_context(context, &sync, &request.target)?;
+
+        Ok(ProjectExecutionOutcome {
+            exit_code: execution.execute()?,
+        })
+    }
+
+    fn assemble_context(
+        self,
+        context: &AppContext,
+        sync: &SyncProjectOutcome,
+        target: &str,
+    ) -> Result<ProjectExecutionContext, ProjectError> {
+        let input = ProjectSyncInputLoader.load(context)?;
+        let identity = input.project_identity()?;
+        let installation = selected_installation(context, &input.pinned_python)?;
+        input.validate_selected_interpreter(&installation.version)?;
+        let environment = ProjectEnvironmentStore.ensure(
+            context,
+            &identity,
+            &ProjectPythonSelection {
+                selector: input.pinned_python.clone(),
+                installation,
+            },
+        )?;
+        let plan = ProjectExecutionPlan::resolve(
+            &input.pyproject_path,
+            &input.project_root,
+            &environment.environment_path,
+            target,
+        )?;
+
+        Ok(ProjectExecutionContext {
+            project_root: sync.project_root.clone(),
+            environment,
+            plan,
+        })
+    }
+}
+
+impl ProjectExecutionContext {
+    fn execute(&self) -> Result<i32, ProjectError> {
+        self.plan
+            .execute(&self.environment.interpreter_path, &self.project_root)
+    }
 }
 
 impl ProjectExecutionPlan {
@@ -243,10 +338,18 @@ fn exit_code(status: &ExitStatus) -> i32 {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::path::PathBuf;
+    use std::process::Command;
 
     use camino::Utf8PathBuf;
+    use pyra_core::{AppContext, AppPaths, Verbosity};
+    use pyra_python::{ArchiveFormat, HostTarget, InstalledPythonRecord, PythonVersion};
 
-    use super::{ProjectExecutionPlan, environment_scripts_dir};
+    use super::{
+        ProjectExecutionPlan, ProjectExecutionService, ResolvedRunTarget, environment_scripts_dir,
+    };
+    use crate::environment::{ProjectEnvironmentStore, ProjectPythonSelection};
+    use crate::service::SyncProjectOutcome;
 
     #[test]
     fn resolves_project_scripts_before_console_scripts() {
@@ -273,5 +376,204 @@ demo = "app:main"
             .expect("plan");
 
         assert!(matches!(plan, ProjectExecutionPlan { .. }));
+    }
+
+    #[test]
+    fn assembles_execution_context_for_python_file_targets() {
+        let temp_dir = tempfile::tempdir().expect("temporary directory");
+        let root = Utf8PathBuf::from_path_buf(temp_dir.path().join("workspace").join("sample"))
+            .expect("utf-8 root");
+        fs::create_dir_all(&root).expect("project root");
+        let python_version = system_python_version().expect("system python version");
+        write_pyproject(
+            &root.join("pyproject.toml"),
+            &python_version,
+            r#"
+[project]
+name = "sample"
+version = "0.1.0"
+dependencies = []
+
+[tool.pyra]
+python = "{python_version}"
+"#,
+        );
+        fs::write(
+            root.join("hello.py"),
+            "print('hello from execution context')\n",
+        )
+        .expect("python file");
+        let context = context_for_project(temp_dir.path(), &root);
+        seed_managed_install(&context, &python_version).expect("managed install");
+
+        let execution = ProjectExecutionService
+            .assemble_context(&context, &sync_outcome(&root), "hello.py")
+            .expect("execution context");
+
+        assert_eq!(execution.project_root, root);
+        assert!(execution.environment.environment_path.exists());
+        assert!(execution.environment.interpreter_path.exists());
+        assert!(matches!(
+            execution.plan.target,
+            ResolvedRunTarget::PythonFile { ref script_path } if script_path == &root.join("hello.py")
+        ));
+    }
+
+    #[test]
+    fn assembles_execution_context_for_console_script_targets() {
+        let temp_dir = tempfile::tempdir().expect("temporary directory");
+        let root = Utf8PathBuf::from_path_buf(temp_dir.path().join("workspace").join("sample"))
+            .expect("utf-8 root");
+        fs::create_dir_all(&root).expect("project root");
+        let python_version = system_python_version().expect("system python version");
+        write_pyproject(
+            &root.join("pyproject.toml"),
+            &python_version,
+            r#"
+[project]
+name = "sample"
+version = "0.1.0"
+dependencies = []
+
+[tool.pyra]
+python = "{python_version}"
+"#,
+        );
+        let context = context_for_project(temp_dir.path(), &root);
+        seed_managed_install(&context, &python_version).expect("managed install");
+        let identity = crate::sync::ProjectSyncInputLoader
+            .load(&context)
+            .expect("project input")
+            .project_identity()
+            .expect("project identity");
+        let environment = ProjectEnvironmentStore
+            .ensure(
+                &context,
+                &identity,
+                &ProjectPythonSelection {
+                    selector: pyra_python::PythonVersionRequest::parse(&python_version)
+                        .expect("python selector"),
+                    installation: crate::service::selected_installation(
+                        &context,
+                        &pyra_python::PythonVersionRequest::parse(&python_version)
+                            .expect("python selector"),
+                    )
+                    .expect("selected installation"),
+                },
+            )
+            .expect("environment");
+        let scripts_dir = environment_scripts_dir(&environment.environment_path);
+        fs::create_dir_all(&scripts_dir).expect("scripts dir");
+        fs::write(scripts_dir.join("demo"), "").expect("console script");
+
+        let execution = ProjectExecutionService
+            .assemble_context(&context, &sync_outcome(&root), "demo")
+            .expect("execution context");
+
+        assert_eq!(
+            execution.environment.environment_path,
+            environment.environment_path
+        );
+        assert!(matches!(
+            execution.plan.target,
+            ResolvedRunTarget::ConsoleScript { ref executable_path }
+                if executable_path == &scripts_dir.join("demo")
+        ));
+    }
+
+    fn sync_outcome(project_root: &camino::Utf8Path) -> SyncProjectOutcome {
+        SyncProjectOutcome {
+            project_root: project_root.to_path_buf(),
+            pyproject_path: project_root.join("pyproject.toml"),
+            pylock_path: project_root.join("pylock.toml"),
+            project_id: "project-id".to_string(),
+            python_version: "3.13.12".to_string(),
+            lock_refreshed: false,
+            selected_groups: Vec::new(),
+            selected_extras: Vec::new(),
+            installed_packages: 0,
+            removed_packages: 0,
+            project_installed: false,
+        }
+    }
+
+    fn context_for_project(
+        temp_root: &std::path::Path,
+        project_root: &camino::Utf8Path,
+    ) -> AppContext {
+        let config_dir =
+            Utf8PathBuf::from_path_buf(temp_root.join("config")).expect("utf-8 config");
+        let data_dir = Utf8PathBuf::from_path_buf(temp_root.join("data")).expect("utf-8 data");
+        let cache_dir = Utf8PathBuf::from_path_buf(temp_root.join("cache")).expect("utf-8 cache");
+        let state_dir = Utf8PathBuf::from_path_buf(temp_root.join("state")).expect("utf-8 state");
+        let paths = AppPaths::from_roots(config_dir, data_dir, cache_dir, state_dir);
+        AppContext::new(project_root.to_path_buf(), paths, Verbosity::Normal)
+    }
+
+    fn write_pyproject(path: &camino::Utf8Path, python_version: &str, template: &str) {
+        let rendered = template.replace("{python_version}", python_version);
+        fs::write(path, rendered.trim_start()).expect("pyproject");
+    }
+
+    fn seed_managed_install(
+        context: &AppContext,
+        version: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let install_dir = context.paths.python_version_dir(version);
+        fs::create_dir_all(&install_dir)?;
+
+        let record = InstalledPythonRecord {
+            version: PythonVersion::parse(version)?,
+            implementation: "cpython".to_string(),
+            build_id: "20260325".to_string(),
+            target_triple: HostTarget::detect()?.target_triple().to_string(),
+            asset_name: format!("cpython-{version}.tar.gz"),
+            archive_format: ArchiveFormat::TarGz,
+            download_url: "file:///dev/null".to_string(),
+            checksum_sha256: None,
+            install_dir,
+            executable_path: Utf8PathBuf::from_path_buf(system_python()?)
+                .expect("utf-8 python path"),
+        };
+
+        fs::write(
+            record.install_dir.join("installation.json"),
+            serde_json::to_vec_pretty(&record)?,
+        )?;
+
+        Ok(())
+    }
+
+    fn system_python() -> Result<PathBuf, Box<dyn std::error::Error>> {
+        for candidate in ["python3", "python"] {
+            let output = Command::new(candidate)
+                .args(["-c", "import sys; print(sys.executable)"])
+                .output();
+            match output {
+                Ok(output) if output.status.success() => {
+                    let path = String::from_utf8(output.stdout)?.trim().to_string();
+                    if !path.is_empty() {
+                        return Ok(PathBuf::from(path));
+                    }
+                }
+                Ok(_) | Err(_) => {}
+            }
+        }
+
+        Err("no usable system python was found for execution tests".into())
+    }
+
+    fn system_python_version() -> Result<String, Box<dyn std::error::Error>> {
+        let output = Command::new(system_python()?)
+            .args([
+                "-c",
+                "import sys; print('.'.join(map(str, sys.version_info[:3])))",
+            ])
+            .output()?;
+        if !output.status.success() {
+            return Err("failed to determine system python version".into());
+        }
+
+        Ok(String::from_utf8(output.stdout)?.trim().to_string())
     }
 }

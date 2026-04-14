@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 use crate::{
     ProjectError,
     environment::{ProjectEnvironmentRecord, ProjectEnvironmentStore, ProjectPythonSelection},
-    execution::ProjectExecutionPlan,
+    execution::{ProjectExecutionRequest, ProjectExecutionService},
     identity::{ProjectIdentity, find_project_root},
     init::{InitProjectOutcome, create_initial_layout, validate_initial_layout},
     pyproject::{
@@ -235,28 +235,18 @@ impl ProjectService {
         context: &AppContext,
         request: RunProjectRequest,
     ) -> Result<RunProjectOutcome, ProjectError> {
-        let sync = self.sync(context, SyncProjectRequest::default()).await?;
-        let input = ProjectSyncInputLoader.load(context)?;
-        let identity = input.project_identity()?;
-        let installation = selected_installation(context, &input.pinned_python)?;
-        input.validate_selected_interpreter(&installation.version)?;
-        let environment = ProjectEnvironmentStore.ensure(
-            context,
-            &identity,
-            &ProjectPythonSelection {
-                selector: input.pinned_python.clone(),
-                installation: installation.clone(),
-            },
-        )?;
-        let plan = ProjectExecutionPlan::resolve(
-            &input.pyproject_path,
-            &input.project_root,
-            &environment.environment_path,
-            &request.target,
-        )?;
-        let exit_code = plan.execute(&environment.interpreter_path, &sync.project_root)?;
+        let outcome = ProjectExecutionService
+            .execute(
+                context,
+                ProjectExecutionRequest {
+                    target: request.target,
+                },
+            )
+            .await?;
 
-        Ok(RunProjectOutcome { exit_code })
+        Ok(RunProjectOutcome {
+            exit_code: outcome.exit_code,
+        })
     }
 
     pub fn select_latest_installed_python(
@@ -398,7 +388,7 @@ impl ProjectService {
     }
 }
 
-fn selected_installation(
+pub(crate) fn selected_installation(
     context: &AppContext,
     pinned_python: &PythonVersionRequest,
 ) -> Result<InstalledPythonRecord, ProjectError> {
