@@ -422,7 +422,7 @@ Acceptance criteria:
 
 - default sync resolves when needed
 - `--locked` requires an existing fresh lock and never resolves
-- `--frozen` requires an existing lock, never resolves, and never rewrites it
+- `--frozen` requires an existing fresh lock, never resolves, and never rewrites it
 - `--locked` and `--frozen` are mutually exclusive
 
 Tests required:
@@ -430,7 +430,7 @@ Tests required:
 - CLI test for `--locked` with missing lock
 - CLI test for `--locked` with stale lock
 - CLI test for `--locked` with fresh lock
-- CLI test for `--frozen` using a stale lock without rewrite
+- CLI test for `--frozen` with stale lock (must fail without rewrite)
 
 #### M2.2: Add Typed `pyproject.toml` Mutation API
 

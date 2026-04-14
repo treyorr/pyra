@@ -48,6 +48,10 @@ That lookup order should be preserved explicitly as execution support expands.
 - install ad hoc packages
 - create a separate temporary environment model
 
+Current execution applies a Python startup guard so `pip install` and
+`pip uninstall` attempts inside `pyra run` fail fast with guidance to use the
+lock-driven `add/remove -> sync` flow.
+
 It should reuse:
 
 - project discovery

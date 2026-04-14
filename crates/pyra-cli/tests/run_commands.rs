@@ -217,6 +217,49 @@ python = "{python_version}"
 }
 
 #[test]
+fn run_blocks_nested_pip_install_mutations() {
+    let home = temp_env_root();
+    let project_root = home.path().join("workspace").join("sample-run-pip-guard");
+    fs::create_dir_all(&project_root).expect("project root");
+    let python_version = system_python_version().expect("system python version");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        format!(
+            r#"[project]
+name = "sample-run-pip-guard"
+version = "0.1.0"
+dependencies = []
+
+[tool.pyra]
+python = "{python_version}"
+"#,
+        ),
+    )
+    .expect("pyproject");
+
+    seed_managed_install(&home, &python_version).expect("managed install");
+
+    base_command(&home)
+        .current_dir(&project_root)
+        .args([
+            "run",
+            "python",
+            "-c",
+            "import subprocess, sys; subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'attrs==25.1.0'])",
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("blocked ad hoc pip mutation during `pyra run`"));
+
+    base_command(&home)
+        .current_dir(&project_root)
+        .args(["run", "python", "-c", "print('run still works')"])
+        .assert()
+        .success()
+        .stdout(contains("run still works"));
+}
+
+#[test]
 fn run_preserves_child_exit_codes() {
     let home = temp_env_root();
     let project_root = home.path().join("workspace").join("sample-run-exit-code");

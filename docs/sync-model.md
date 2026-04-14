@@ -58,9 +58,9 @@ updated lock before reconciling the centralized environment.
 never rewrites the lock. If the lock is missing or stale for the current
 inputs, sync fails instead of updating it.
 
-`sync --frozen` requires an existing `pylock.toml`. It never resolves and never
-rewrites the lock, even when the current project inputs would make that lock
-stale. Installation still applies from the recorded lock contents.
+`sync --frozen` requires an existing fresh `pylock.toml`. It never resolves and
+never rewrites the lock. If the lock is missing or stale for the current
+inputs, sync fails instead of updating it.
 
 ## Resolution Scope
 

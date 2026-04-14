@@ -154,6 +154,8 @@ pub enum ProjectError {
     StaleLockfileForLockedSync { path: String },
     #[error("`sync --frozen` requires an existing lock file at {path}")]
     MissingLockfileForFrozenSync { path: String },
+    #[error("`sync --frozen` requires a fresh lock file at {path}")]
+    StaleLockfileForFrozenSync { path: String },
     #[error("failed to read pylock.toml at {path}")]
     ReadLockfile {
         path: String,
@@ -259,6 +261,20 @@ pub enum ProjectError {
         #[source]
         source: io::Error,
     },
+    #[error("failed to create run mutation guard directory at {path}")]
+    PrepareRunMutationGuardDirectory {
+        path: String,
+        #[source]
+        source: io::Error,
+    },
+    #[error("failed to write run mutation guard script at {path}")]
+    WriteRunMutationGuardScript {
+        path: String,
+        #[source]
+        source: io::Error,
+    },
+    #[error("failed to compose PYTHONPATH for run mutation guard: {detail}")]
+    ComposeRunMutationGuardPythonPath { detail: String },
 }
 
 impl UserFacingError for ProjectError {
@@ -562,6 +578,13 @@ impl UserFacingError for ProjectError {
             .with_detail("`--frozen` installs strictly from an existing lock file and never resolves or rewrites it.")
             .with_suggestion("Run `pyra sync` first to generate `pylock.toml`, then rerun `pyra sync --frozen`.")
             .with_verbose_detail(path.clone()),
+            Self::StaleLockfileForFrozenSync { path } => ErrorReport::new(
+                ErrorKind::User,
+                "`pylock.toml` is stale, so `pyra sync --frozen` stopped.",
+            )
+            .with_detail("The current project or resolution inputs no longer match the recorded lock freshness data, and `--frozen` never regenerates the lock.")
+            .with_suggestion("Run `pyra sync` to refresh `pylock.toml`, then rerun `pyra sync --frozen`.")
+            .with_verbose_detail(path.clone()),
             Self::ReadLockfile { path, source } => ErrorReport::new(
                 ErrorKind::System,
                 format!("Pyra could not read `{path}`."),
@@ -757,6 +780,27 @@ impl UserFacingError for ProjectError {
             .with_detail("Pyra synchronized the project environment, but the operating system rejected the execution step.")
             .with_suggestion("Check that the managed interpreter and environment scripts still exist, then retry.")
             .with_verbose_detail(source.to_string()),
+            Self::PrepareRunMutationGuardDirectory { path, source } => ErrorReport::new(
+                ErrorKind::System,
+                format!("Pyra could not prepare run mutation guard directory `{path}`."),
+            )
+            .with_detail("`pyra run` blocks ad hoc installers through a Python startup guard, but the guard directory could not be created.")
+            .with_suggestion("Check filesystem permissions for the centralized environment path and retry.")
+            .with_verbose_detail(source.to_string()),
+            Self::WriteRunMutationGuardScript { path, source } => ErrorReport::new(
+                ErrorKind::System,
+                format!("Pyra could not write run mutation guard script `{path}`."),
+            )
+            .with_detail("`pyra run` blocks ad hoc installers through a Python startup guard, but the guard script could not be written.")
+            .with_suggestion("Check filesystem permissions for the centralized environment path and retry.")
+            .with_verbose_detail(source.to_string()),
+            Self::ComposeRunMutationGuardPythonPath { detail } => ErrorReport::new(
+                ErrorKind::Internal,
+                "Pyra could not configure `PYTHONPATH` for `pyra run`.",
+            )
+            .with_detail("Pyra could not compose the startup guard path required to block ad hoc installers during command execution.")
+            .with_suggestion("Retry the command. If the error persists, report this as a Pyra bug.")
+            .with_verbose_detail(detail.clone()),
         }
     }
 }

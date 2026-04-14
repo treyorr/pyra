@@ -422,6 +422,7 @@ targets = ["{host_target}", "{foreign_target}"]
 #[test]
 fn sync_frozen_uses_only_the_current_host_slice_from_a_multi_target_lock() {
     let home = temp_env_root();
+    let (host_target, foreign_target) = host_and_foreign_targets().expect("supported host target");
     let project_root = home
         .path()
         .join("workspace")
@@ -429,14 +430,17 @@ fn sync_frozen_uses_only_the_current_host_slice_from_a_multi_target_lock() {
     fs::create_dir_all(&project_root).expect("project root");
     fs::write(
         project_root.join("pyproject.toml"),
-        r#"[project]
+        format!(
+            r#"[project]
 name = "sample-sync-frozen-multi-target"
 version = "0.1.0"
 dependencies = []
 
 [tool.pyra]
 python = "3.13.12"
+targets = ["{host_target}", "{foreign_target}"]
 "#,
+        ),
     )
     .expect("pyproject");
 
@@ -445,7 +449,10 @@ python = "3.13.12"
     seed_managed_install_with_executable(&home, "3.13.12", &fake_python).expect("managed install");
     let state_path = home.path().join("unused-installer-state.json");
 
-    let (host_target, foreign_target) = host_and_foreign_targets().expect("supported host target");
+    let mut input_fingerprint_digest = Sha256::new();
+    input_fingerprint_digest.update("sample-sync-frozen-multi-target".as_bytes());
+    input_fingerprint_digest.update("3.13.12".as_bytes());
+    let input_fingerprint = format!("{:x}", input_fingerprint_digest.finalize());
     let host_wheel_name = wheel_name_for_target("shared", "1.0.0", &host_target);
     let foreign_wheel_name = wheel_name_for_target("shared", "1.0.0", &foreign_target);
     let foreign_only_wheel_name = wheel_name_for_target("foreign-only", "2.0.0", &foreign_target);
@@ -505,12 +512,13 @@ url = "file://{host_wheel_path}"
 hashes = {{ sha256 = "{host_sha256}" }}
 
 [tool.pyra]
-input-fingerprint = "frozen-test"
+input-fingerprint = "{input_fingerprint}"
 interpreter-version = "3.13.12"
 target-triple = "{host_target}"
-index-url = "https://example.test/simple"
+index-url = "https://pypi.org/simple"
 resolution-strategy = "environment-scoped-matrix-v1"
 "#,
+            input_fingerprint = input_fingerprint,
             host_environment_id = lock_environment_id("3.13.12", &host_target),
             host_environment_marker = lock_environment_marker("3.13.12", &host_target),
             foreign_environment_id = lock_environment_id("3.13.12", &foreign_target),
@@ -821,7 +829,7 @@ python = "3.13.12"
 }
 
 #[test]
-fn sync_frozen_uses_stale_lock_without_rewrite() {
+fn sync_frozen_fails_when_lock_is_stale() {
     let home = temp_env_root();
     let index = start_fixture_index();
     let project_root = home
@@ -874,8 +882,9 @@ python = "3.13.12"
         .env("PYRA_INDEX_URL", &index.base_url)
         .args(["sync", "--frozen"])
         .assert()
-        .success()
-        .stdout(contains("Reused the current lock"));
+        .failure()
+        .stderr(contains("stale"))
+        .stderr(contains("sync --frozen"));
 
     let current_lock = fs::read_to_string(&lock_path).expect("pylock");
     assert_eq!(original_lock, current_lock);

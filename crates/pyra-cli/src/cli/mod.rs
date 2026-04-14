@@ -110,7 +110,7 @@ pub struct SyncArgs {
     /// Require an existing fresh lock file and never regenerate it.
     #[arg(long, conflicts_with = "frozen")]
     pub locked: bool,
-    /// Require an existing lock file and use it without rewriting.
+    /// Require an existing fresh lock file and use it without rewriting.
     #[arg(long, conflicts_with = "locked")]
     pub frozen: bool,
     /// Add one lock-generation target triple for this sync invocation only.

@@ -337,9 +337,14 @@ impl ProjectService {
                     });
                 }
 
-                // `--frozen` intentionally trusts the existing lock as the
-                // install source even when freshness inputs have changed.
-                (LockFile::read(&input.pylock_path)?, false)
+                let lock = LockFile::read(&input.pylock_path)?;
+                if !lock.is_fresh_for(&freshness, &lock_targets) {
+                    return Err(ProjectError::StaleLockfileForFrozenSync {
+                        path: input.pylock_path.to_string(),
+                    });
+                }
+
+                (lock, false)
             }
         };
 

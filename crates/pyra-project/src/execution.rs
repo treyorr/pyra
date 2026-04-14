@@ -43,6 +43,55 @@ result = target()
 raise SystemExit(0 if result is None else result)
 "#;
 
+const RUN_MUTATION_GUARD_SCRIPT: &str = r#"
+import os
+import pathlib
+import sys
+
+if os.environ.get("PYRA_RUN_MUTATION_GUARD") != "1":
+    pass
+else:
+    MUTATING_PIP_COMMANDS = {"install", "uninstall"}
+
+    def _normalize(token):
+        return token.strip().lower()
+
+    def _base_command(token):
+        name = pathlib.Path(token).name.lower()
+        for suffix in (".exe", ".cmd", ".bat", ".py"):
+            if name.endswith(suffix):
+                name = name[: -len(suffix)]
+        return name
+
+    def _is_pip_executable(token):
+        name = _base_command(token)
+        return name == "pip" or name.startswith("pip3")
+
+    def _pip_subcommand(argv, orig_argv):
+        if orig_argv and _is_pip_executable(orig_argv[0]):
+            return _normalize(orig_argv[1]) if len(orig_argv) > 1 else None
+
+        for index, token in enumerate(orig_argv):
+            if token == "-m" and index + 1 < len(orig_argv) and orig_argv[index + 1] == "pip":
+                return _normalize(orig_argv[index + 2]) if index + 2 < len(orig_argv) else None
+
+        if argv and ("pip" in _base_command(argv[0]) or "__main__.py" in argv[0].lower()):
+            return _normalize(argv[1]) if len(argv) > 1 else None
+
+        return None
+
+    argv = [_normalize(token) for token in sys.argv]
+    orig_argv = [_normalize(token) for token in getattr(sys, "orig_argv", [])]
+    subcommand = _pip_subcommand(argv, orig_argv)
+    if subcommand in MUTATING_PIP_COMMANDS:
+        print(
+            "Pyra blocked ad hoc pip mutation during `pyra run`. "
+            "Use `pyra add`/`pyra remove` and `pyra sync` instead.",
+            file=sys.stderr,
+        )
+        raise SystemExit(86)
+"#;
+
 /// Request to execute one project target through the synchronized centralized
 /// environment.
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -149,6 +198,7 @@ impl ProjectExecutionContext {
     fn execute(&self) -> Result<i32, ProjectError> {
         self.plan.execute(
             &self.environment.interpreter_path,
+            &self.environment.environment_path,
             &self.project_root,
             &self.args,
         )
@@ -193,9 +243,11 @@ impl ProjectExecutionPlan {
     pub fn execute(
         &self,
         interpreter_path: &Utf8Path,
+        environment_path: &Utf8Path,
         project_root: &Utf8Path,
         args: &[String],
     ) -> Result<i32, ProjectError> {
+        let run_guard_path = ensure_run_mutation_guard(environment_path)?;
         let status = match &self.target {
             ResolvedRunTarget::ProjectScript {
                 script_name,
@@ -203,6 +255,7 @@ impl ProjectExecutionPlan {
                 callable_path,
             } => {
                 let mut command = Command::new(interpreter_path.as_std_path());
+                configure_python_run_guard(&mut command, &run_guard_path)?;
                 command
                     .arg("-c")
                     .arg(PROJECT_SCRIPT_RUNNER)
@@ -224,6 +277,7 @@ impl ProjectExecutionPlan {
                     .unwrap_or(executable_path.as_str())
                     .to_string();
                 let mut command = Command::new(executable_path.as_std_path());
+                configure_python_run_guard(&mut command, &run_guard_path)?;
                 command.args(args).current_dir(project_root.as_std_path());
                 command
                     .status()
@@ -231,6 +285,7 @@ impl ProjectExecutionPlan {
             }
             ResolvedRunTarget::PythonFile { script_path } => {
                 let mut command = Command::new(interpreter_path.as_std_path());
+                configure_python_run_guard(&mut command, &run_guard_path)?;
                 command
                     .arg(script_path.as_std_path())
                     .args(args)
@@ -246,6 +301,42 @@ impl ProjectExecutionPlan {
 
         Ok(exit_code(&status))
     }
+}
+
+fn ensure_run_mutation_guard(environment_path: &Utf8Path) -> Result<Utf8PathBuf, ProjectError> {
+    let guard_path = environment_path.join(".pyra").join("run-guard");
+    fs::create_dir_all(guard_path.as_std_path()).map_err(|source| {
+        ProjectError::PrepareRunMutationGuardDirectory {
+            path: guard_path.to_string(),
+            source,
+        }
+    })?;
+    let script_path = guard_path.join("sitecustomize.py");
+    fs::write(script_path.as_std_path(), RUN_MUTATION_GUARD_SCRIPT).map_err(|source| {
+        ProjectError::WriteRunMutationGuardScript {
+            path: script_path.to_string(),
+            source,
+        }
+    })?;
+    Ok(guard_path)
+}
+
+fn configure_python_run_guard(
+    command: &mut Command,
+    guard_path: &Utf8Path,
+) -> Result<(), ProjectError> {
+    let mut python_path_entries = vec![std::path::PathBuf::from(guard_path.as_str())];
+    if let Some(existing) = std::env::var_os("PYTHONPATH") {
+        python_path_entries.extend(std::env::split_paths(&existing));
+    }
+    let python_path = std::env::join_paths(&python_path_entries).map_err(|source| {
+        ProjectError::ComposeRunMutationGuardPythonPath {
+            detail: source.to_string(),
+        }
+    })?;
+    command.env("PYRA_RUN_MUTATION_GUARD", "1");
+    command.env("PYTHONPATH", python_path);
+    Ok(())
 }
 
 fn read_project_script(
