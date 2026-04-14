@@ -122,4 +122,5 @@ Current multi-target generation is intentionally narrow:
 - per-target environment metadata is recorded explicitly
 - the merged lock is accepted only when package graph shape stays identical
   across targets
-- target configuration and host-specific slice selection remain future work
+- current-host install selection narrows the lock to host-compatible artifacts
+- target configuration remains future work

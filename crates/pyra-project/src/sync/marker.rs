@@ -234,14 +234,20 @@ mod tests {
         let group_selection = LockSelection {
             groups: ["dev".to_string()].into_iter().collect(),
             extras: BTreeSet::new(),
+            python_full_version: "3.13.12".to_string(),
+            target_triple: "aarch64-apple-darwin".to_string(),
         };
         let extra_selection = LockSelection {
             groups: BTreeSet::new(),
             extras: ["feature".to_string()].into_iter().collect(),
+            python_full_version: "3.13.12".to_string(),
+            target_triple: "aarch64-apple-darwin".to_string(),
         };
         let missing_selection = LockSelection {
             groups: ["docs".to_string()].into_iter().collect(),
             extras: ["other".to_string()].into_iter().collect(),
+            python_full_version: "3.13.12".to_string(),
+            target_triple: "aarch64-apple-darwin".to_string(),
         };
 
         assert!(marker.matches(&group_selection));

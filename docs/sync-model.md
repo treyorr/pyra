@@ -101,6 +101,7 @@ The installer:
 
 - Selects lock entries whose markers match the current `dependency_groups` and
   `extras`.
+- Narrows multi-target lock artifacts to the current host before installation.
 - Installs missing or changed locked packages.
 - Removes packages not present in the selected lock subset.
 - Installs the current project editable only when a build system is present.

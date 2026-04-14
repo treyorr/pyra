@@ -30,8 +30,8 @@ use crate::{
     sync::{
         CURRENT_RESOLUTION_STRATEGY, EnvironmentInstaller, LockArtifact, LockDependencyRef,
         LockEnvironment, LockFile, LockFreshness, LockMarker, LockMarkerClause, LockPackage,
-        LockSelection, MULTI_TARGET_RESOLUTION_STRATEGY, ProjectSyncInput, ProjectSyncInputLoader,
-        ReconciliationPlan, SyncSelectionRequest, SyncSelectionResolver,
+        LockSelection, ProjectSyncInput, ProjectSyncInputLoader, ReconciliationPlan,
+        SyncSelectionRequest, SyncSelectionResolver,
     },
 };
 
@@ -342,6 +342,8 @@ impl ProjectService {
         let lock_selection = LockSelection {
             groups: selected_groups.clone(),
             extras: selection.extras.clone(),
+            python_full_version: installation.version.to_string(),
+            target_triple: installation.target_triple.clone(),
         };
         let selected_packages = ReconciliationPlan::for_selection(&lock.packages, &lock_selection);
         let installed_packages =
@@ -781,10 +783,11 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        MULTI_TARGET_RESOLUTION_STRATEGY, ProjectService, SyncLockMode, SyncProjectRequest,
-        lock_freshness, resolve_lock_for_environments, resolver_environment_for_target,
+        ProjectService, SyncLockMode, SyncProjectRequest, lock_freshness,
+        resolve_lock_for_environments, resolver_environment_for_target,
     };
     use crate::ProjectError;
+    use crate::sync::MULTI_TARGET_RESOLUTION_STRATEGY;
 
     #[test]
     fn selects_latest_installed_python_version() {

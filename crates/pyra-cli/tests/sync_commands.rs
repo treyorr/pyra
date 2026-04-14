@@ -247,6 +247,143 @@ python = "3.13.12"
     assert!(Path::new(&install_target).exists());
 }
 
+#[cfg(unix)]
+#[test]
+fn sync_frozen_uses_only_the_current_host_slice_from_a_multi_target_lock() {
+    let home = temp_env_root();
+    let project_root = home
+        .path()
+        .join("workspace")
+        .join("sample-sync-frozen-multi-target");
+    fs::create_dir_all(&project_root).expect("project root");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        r#"[project]
+name = "sample-sync-frozen-multi-target"
+version = "0.1.0"
+dependencies = []
+
+[tool.pyra]
+python = "3.13.12"
+"#,
+    )
+    .expect("pyproject");
+
+    let log_path = home.path().join("fake-python-log.jsonl");
+    let fake_python = build_fake_managed_python(home.path(), &log_path).expect("fake python");
+    seed_managed_install_with_executable(&home, "3.13.12", &fake_python).expect("managed install");
+    let state_path = home.path().join("unused-installer-state.json");
+
+    let (host_target, foreign_target) = host_and_foreign_targets().expect("supported host target");
+    let host_wheel_name = wheel_name_for_target("shared", "1.0.0", &host_target);
+    let foreign_wheel_name = wheel_name_for_target("shared", "1.0.0", &foreign_target);
+    let foreign_only_wheel_name = wheel_name_for_target("foreign-only", "2.0.0", &foreign_target);
+    let host_wheel_path = home.path().join(&host_wheel_name);
+    let foreign_wheel_path = home.path().join(&foreign_wheel_name);
+    let foreign_only_wheel_path = home.path().join(&foreign_only_wheel_name);
+    let host_wheel_bytes = fixture_artifact_bytes(&host_wheel_name);
+    let foreign_wheel_bytes = fixture_artifact_bytes(&foreign_wheel_name);
+    let foreign_only_wheel_bytes = fixture_artifact_bytes(&foreign_only_wheel_name);
+    fs::write(&host_wheel_path, &host_wheel_bytes).expect("host wheel");
+    fs::write(&foreign_wheel_path, &foreign_wheel_bytes).expect("foreign shared wheel");
+    fs::write(&foreign_only_wheel_path, &foreign_only_wheel_bytes).expect("foreign-only wheel");
+
+    fs::write(
+        project_root.join("pylock.toml"),
+        format!(
+            r#"lock-version = "1.0"
+extras = []
+dependency-groups = []
+default-groups = ["pyra-default"]
+created-by = "pyra"
+
+[[environments]]
+id = "{host_environment_id}"
+marker = "{host_environment_marker}"
+interpreter-version = "3.13.12"
+target-triple = "{host_target}"
+
+[[environments]]
+id = "{foreign_environment_id}"
+marker = "{foreign_environment_marker}"
+interpreter-version = "3.13.12"
+target-triple = "{foreign_target}"
+
+[[packages]]
+name = "foreign-only"
+version = "2.0.0"
+marker = "'pyra-default' in dependency_groups"
+index = "https://example.test/simple"
+[[packages.wheels]]
+name = "{foreign_only_wheel_name}"
+url = "file://{foreign_only_wheel_path}"
+hashes = {{ sha256 = "{foreign_only_sha256}" }}
+
+[[packages]]
+name = "shared"
+version = "1.0.0"
+marker = "'pyra-default' in dependency_groups"
+index = "https://example.test/simple"
+[[packages.wheels]]
+name = "{foreign_wheel_name}"
+url = "file://{foreign_wheel_path}"
+hashes = {{ sha256 = "{foreign_sha256}" }}
+[[packages.wheels]]
+name = "{host_wheel_name}"
+url = "file://{host_wheel_path}"
+hashes = {{ sha256 = "{host_sha256}" }}
+
+[tool.pyra]
+input-fingerprint = "frozen-test"
+interpreter-version = "3.13.12"
+target-triple = "{host_target}"
+index-url = "https://example.test/simple"
+resolution-strategy = "environment-scoped-matrix-v1"
+"#,
+            host_environment_id = lock_environment_id("3.13.12", &host_target),
+            host_environment_marker = lock_environment_marker("3.13.12", &host_target),
+            foreign_environment_id = lock_environment_id("3.13.12", &foreign_target),
+            foreign_environment_marker = lock_environment_marker("3.13.12", &foreign_target),
+            host_target = host_target,
+            foreign_target = foreign_target,
+            foreign_only_wheel_name = foreign_only_wheel_name,
+            foreign_only_wheel_path = foreign_only_wheel_path.display(),
+            foreign_only_sha256 = format!("{:x}", Sha256::digest(&foreign_only_wheel_bytes)),
+            foreign_wheel_name = foreign_wheel_name,
+            foreign_wheel_path = foreign_wheel_path.display(),
+            foreign_sha256 = format!("{:x}", Sha256::digest(&foreign_wheel_bytes)),
+            host_wheel_name = host_wheel_name,
+            host_wheel_path = host_wheel_path.display(),
+            host_sha256 = format!("{:x}", Sha256::digest(&host_wheel_bytes)),
+        ),
+    )
+    .expect("pylock");
+
+    base_command(&home, &state_path)
+        .env_remove("PYRA_SYNC_INSTALLER_STATE_PATH")
+        .env("PYRA_FAKE_PYTHON_LOG", &log_path)
+        .current_dir(&project_root)
+        .args(["sync", "--frozen"])
+        .assert()
+        .success()
+        .stdout(contains("Reused the current lock"));
+
+    let install_targets = fake_python_install_targets(&log_path).expect("install targets");
+    assert_eq!(install_targets.len(), 1);
+    let expected_cached_host_artifact = home
+        .path()
+        .join("cache")
+        .join("artifacts")
+        .join("verified")
+        .join(format!("{:x}", Sha256::digest(&host_wheel_bytes)))
+        .join(&host_wheel_name);
+    assert_eq!(
+        PathBuf::from(&install_targets[0]),
+        expected_cached_host_artifact
+    );
+    assert!(expected_cached_host_artifact.exists());
+}
+
 #[test]
 fn sync_reuses_verified_artifact_cache_for_warm_reinstall() {
     let home = temp_env_root();
@@ -1440,23 +1577,76 @@ raise SystemExit(f"unexpected fake interpreter args: {args}")
 
 #[cfg(unix)]
 fn fake_python_install_target(log_path: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    fake_python_install_targets(log_path)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "missing install log entry".into())
+}
+
+#[cfg(unix)]
+fn fake_python_install_targets(log_path: &Path) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let contents = fs::read_to_string(log_path)?;
+    let mut targets = Vec::new();
     for line in contents.lines() {
         let entry: serde_json::Value = serde_json::from_str(line)?;
         if entry.get("kind") == Some(&serde_json::Value::String("install".to_string())) {
             assert_eq!(entry.get("exists"), Some(&serde_json::Value::Bool(true)));
-            return entry
+            let target = entry
                 .get("target")
                 .and_then(serde_json::Value::as_str)
-                .map(ToString::to_string)
-                .ok_or_else(|| "missing install target".into());
+                .ok_or("missing install target")?;
+            targets.push(target.to_string());
         }
     }
-    Err("missing install log entry".into())
+    Ok(targets)
 }
 
 fn read_state(path: &Path) -> std::collections::BTreeMap<String, String> {
     serde_json::from_slice(&fs::read(path).expect("state")).expect("state json")
+}
+
+#[cfg(unix)]
+fn host_and_foreign_targets() -> Result<(String, String), Box<dyn std::error::Error>> {
+    let host = HostTarget::detect()?.target_triple().to_string();
+    let foreign = match host.as_str() {
+        "aarch64-apple-darwin" => "x86_64-unknown-linux-gnu",
+        "x86_64-apple-darwin" => "x86_64-unknown-linux-gnu",
+        "x86_64-unknown-linux-gnu" => "x86_64-apple-darwin",
+        "aarch64-unknown-linux-gnu" => "aarch64-apple-darwin",
+        other => return Err(format!("unsupported host target for test: {other}").into()),
+    };
+    Ok((host, foreign.to_string()))
+}
+
+#[cfg(unix)]
+fn wheel_name_for_target(package: &str, version: &str, target: &str) -> String {
+    let platform_tag = match target {
+        "aarch64-apple-darwin" => "macosx_11_0_arm64",
+        "x86_64-apple-darwin" => "macosx_11_0_x86_64",
+        "x86_64-unknown-linux-gnu" => "manylinux_2_17_x86_64",
+        "aarch64-unknown-linux-gnu" => "manylinux_2_17_aarch64",
+        other => panic!("unsupported target triple for test wheel: {other}"),
+    };
+    format!("{package}-{version}-cp313-abi3-{platform_tag}.whl")
+}
+
+#[cfg(unix)]
+fn lock_environment_id(version: &str, target: &str) -> String {
+    format!("cpython-{version}-{target}")
+}
+
+#[cfg(unix)]
+fn lock_environment_marker(version: &str, target: &str) -> String {
+    let (sys_platform, platform_machine) = match target {
+        "aarch64-apple-darwin" => ("darwin", "arm64"),
+        "x86_64-apple-darwin" => ("darwin", "x86_64"),
+        "x86_64-unknown-linux-gnu" => ("linux", "x86_64"),
+        "aarch64-unknown-linux-gnu" => ("linux", "aarch64"),
+        other => panic!("unsupported target triple for test environment: {other}"),
+    };
+    format!(
+        "implementation_name == 'cpython' and python_full_version == '{version}' and sys_platform == '{sys_platform}' and platform_machine == '{platform_machine}'"
+    )
 }
 
 struct FixtureIndex {

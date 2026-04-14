@@ -84,6 +84,10 @@ pub struct LockFile {
 pub struct LockSelection {
     pub groups: std::collections::BTreeSet<String>,
     pub extras: std::collections::BTreeSet<String>,
+    /// Reconciliation narrows a lock to the current host so a multi-target
+    /// lock can keep foreign artifacts without handing them to the installer.
+    pub python_full_version: String,
+    pub target_triple: String,
 }
 
 impl LockFile {

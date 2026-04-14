@@ -240,7 +240,7 @@ impl ReconciliationPlan {
         packages
             .iter()
             .filter(|package| marker_matches(package.marker.as_ref(), selection))
-            .cloned()
+            .filter_map(|package| package_for_current_host(package, selection))
             .collect()
     }
 }
@@ -251,6 +251,94 @@ fn marker_matches(marker: Option<&crate::sync::LockMarker>, selection: &LockSele
     };
 
     marker.matches(selection)
+}
+
+fn package_for_current_host(
+    package: &LockPackage,
+    selection: &LockSelection,
+) -> Option<LockPackage> {
+    // Multi-target locks may carry wheels for several environments. Narrowing
+    // to the current host here keeps reconciliation exact without leaking
+    // foreign-target artifacts into later installer steps.
+    let compatible_wheels = package
+        .wheels
+        .iter()
+        .filter(|artifact| wheel_compatible_for_selection(&artifact.name, selection))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if compatible_wheels.is_empty() && package.sdist.is_none() {
+        return None;
+    }
+
+    let mut package = package.clone();
+    package.wheels = compatible_wheels;
+    Some(package)
+}
+
+fn wheel_compatible_for_selection(filename: &str, selection: &LockSelection) -> bool {
+    let Some(stem) = filename.strip_suffix(".whl") else {
+        return false;
+    };
+    let parts = stem.split('-').collect::<Vec<_>>();
+    if parts.len() < 5 {
+        return false;
+    }
+
+    let py_tag = parts[parts.len() - 3];
+    let abi_tag = parts[parts.len() - 2];
+    let platform_tag = parts[parts.len() - 1];
+
+    python_tag_compatible(py_tag, selection)
+        && abi_tag_compatible(abi_tag, selection)
+        && platform_tag_compatible(platform_tag, selection)
+}
+
+fn python_tag_compatible(tag: &str, selection: &LockSelection) -> bool {
+    let Some(exact) = exact_python_tag(selection) else {
+        return false;
+    };
+
+    tag.split('.').any(|candidate| {
+        candidate == "py3"
+            || candidate == "py2.py3"
+            || candidate == "py3-none"
+            || candidate == exact
+    })
+}
+
+fn abi_tag_compatible(tag: &str, selection: &LockSelection) -> bool {
+    let Some(exact) = exact_python_tag(selection) else {
+        return false;
+    };
+
+    tag.split('.')
+        .any(|candidate| candidate == "none" || candidate == "abi3" || candidate == exact)
+}
+
+fn exact_python_tag(selection: &LockSelection) -> Option<String> {
+    let mut release = selection.python_full_version.split('.');
+    let major = release.next()?;
+    let minor = release.next()?;
+    Some(format!("cp{major}{minor}"))
+}
+
+fn platform_tag_compatible(tag: &str, selection: &LockSelection) -> bool {
+    if tag == "any" {
+        return true;
+    }
+
+    match selection.target_triple.as_str() {
+        "aarch64-apple-darwin" => tag.contains("macosx") && tag.contains("arm64"),
+        "x86_64-apple-darwin" => tag.contains("macosx") && tag.contains("x86_64"),
+        "x86_64-unknown-linux-gnu" => {
+            (tag.contains("manylinux") || tag.contains("linux")) && tag.contains("x86_64")
+        }
+        "aarch64-unknown-linux-gnu" => {
+            (tag.contains("manylinux") || tag.contains("linux")) && tag.contains("aarch64")
+        }
+        _ => false,
+    }
 }
 
 fn parse_inspected_distributions(
@@ -784,6 +872,8 @@ mod tests {
                     .into_iter()
                     .collect(),
                 extras: BTreeSet::new(),
+                python_full_version: "3.13.12".to_string(),
+                target_triple: "aarch64-apple-darwin".to_string(),
             },
         );
         let installed = BTreeMap::from([
@@ -837,6 +927,8 @@ mod tests {
                     .into_iter()
                     .collect(),
                 extras: ["feature".to_string()].into_iter().collect(),
+                python_full_version: "3.13.12".to_string(),
+                target_triple: "aarch64-apple-darwin".to_string(),
             },
         );
 
@@ -845,6 +937,79 @@ mod tests {
             .map(|package| package.name.as_str())
             .collect::<Vec<_>>();
         assert_eq!(selected_names, vec!["attrs", "pytest", "rich-extra"]);
+    }
+
+    #[test]
+    fn ignores_foreign_target_packages_and_artifacts_for_the_current_host() {
+        let packages = vec![
+            package_with_named_artifacts(
+                "shared",
+                "1.0.0",
+                vec![
+                    artifact_from_name(
+                        "shared-1.0.0-cp313-abi3-macosx_11_0_arm64.whl",
+                        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    ),
+                    artifact_from_name(
+                        "shared-1.0.0-cp313-abi3-manylinux_2_17_x86_64.whl",
+                        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    ),
+                ],
+                None,
+            ),
+            package_with_named_artifacts(
+                "linux-only",
+                "2.0.0",
+                vec![artifact_from_name(
+                    "linux-only-2.0.0-cp313-abi3-manylinux_2_17_x86_64.whl",
+                    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                )],
+                None,
+            ),
+            package_with_named_artifacts(
+                "sdist-fallback",
+                "3.0.0",
+                Vec::new(),
+                Some(artifact_from_name(
+                    "sdist-fallback-3.0.0.tar.gz",
+                    "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                )),
+            ),
+        ];
+
+        let selected = ReconciliationPlan::for_selection(
+            &packages,
+            &LockSelection {
+                groups: ["pyra-default".to_string()].into_iter().collect(),
+                extras: BTreeSet::new(),
+                python_full_version: "3.13.12".to_string(),
+                target_triple: "aarch64-apple-darwin".to_string(),
+            },
+        );
+
+        assert_eq!(
+            selected
+                .iter()
+                .map(|package| package.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["shared", "sdist-fallback"]
+        );
+        assert_eq!(
+            selected[0]
+                .wheels
+                .iter()
+                .map(|wheel| wheel.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["shared-1.0.0-cp313-abi3-macosx_11_0_arm64.whl"]
+        );
+        assert!(selected[1].wheels.is_empty());
+        assert_eq!(
+            selected[1]
+                .sdist
+                .as_ref()
+                .map(|artifact| artifact.name.as_str()),
+            Some("sdist-fallback-3.0.0.tar.gz")
+        );
     }
 
     #[test]
@@ -1238,6 +1403,18 @@ mod tests {
         package
     }
 
+    fn package_with_named_artifacts(
+        name: &str,
+        version: &str,
+        wheels: Vec<LockArtifact>,
+        sdist: Option<LockArtifact>,
+    ) -> LockPackage {
+        let mut package = package(name, version, None);
+        package.wheels = wheels;
+        package.sdist = sdist;
+        package
+    }
+
     fn artifact(path: &Path, sha256: String, name: &str) -> LockArtifact {
         LockArtifact {
             name: name.to_string(),
@@ -1245,6 +1422,16 @@ mod tests {
             size: None,
             upload_time: None,
             sha256,
+        }
+    }
+
+    fn artifact_from_name(name: &str, sha256: &str) -> LockArtifact {
+        LockArtifact {
+            name: name.to_string(),
+            url: format!("https://example.test/{name}"),
+            size: None,
+            upload_time: None,
+            sha256: sha256.to_string(),
         }
     }
 
