@@ -245,6 +245,7 @@ fn build_provider(
 ) -> Result<OfflineDependencyProvider<PackageKey, Ranges<Version>>, ResolverError> {
     let mut provider = OfflineDependencyProvider::<PackageKey, Ranges<Version>>::new();
     let synthetic = Version::from_str("0").expect("synthetic version");
+    let requested_variants = collect_requested_variants(request)?;
 
     let mut root_dependencies = Vec::new();
     for root in &request.roots {
@@ -275,7 +276,10 @@ fn build_provider(
                 candidate.version.clone(),
                 dependency_constraints(candidate, &request.environment, &[])?,
             );
-            let extras = collect_variant_extras(candidates);
+            let mut extras = collect_variant_extras(candidates);
+            if let Some(requested) = requested_variants.get(package) {
+                extras.extend(requested.iter().cloned());
+            }
             for variant in extras {
                 let variant_names = variant.iter().cloned().collect::<Vec<_>>();
                 provider.add_dependencies(
@@ -303,6 +307,37 @@ fn collect_variant_extras(candidates: &[SimpleCandidate]) -> BTreeSet<BTreeSet<S
         }
     }
     variants
+}
+
+fn collect_requested_variants(
+    request: &ResolutionRequest,
+) -> Result<BTreeMap<String, BTreeSet<BTreeSet<String>>>, ResolverError> {
+    let mut variants = BTreeMap::<String, BTreeSet<BTreeSet<String>>>::new();
+    for root in &request.roots {
+        for requirement_text in &root.requirements {
+            let requirement =
+                Requirement::<VerbatimUrl>::from_str(requirement_text).map_err(|_| {
+                    ResolverError::ParseRequirement {
+                        package: root.token.name.clone(),
+                        value: requirement_text.clone(),
+                    }
+                })?;
+            if requirement.extras.is_empty() {
+                continue;
+            }
+            variants
+                .entry(requirement.name.to_string())
+                .or_default()
+                .insert(
+                    requirement
+                        .extras
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<BTreeSet<_>>(),
+                );
+        }
+    }
+    Ok(variants)
 }
 
 fn dependency_constraints(

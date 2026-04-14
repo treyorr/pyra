@@ -295,13 +295,18 @@ impl ProjectService {
         let (lock, lock_refreshed) = match request.lock_mode {
             SyncLockMode::WriteIfNeeded => {
                 if input.pylock_path.exists() {
-                    let lock = LockFile::read(&input.pylock_path)?;
-                    if lock.is_fresh_for(&freshness, &lock_targets) {
-                        (lock, false)
-                    } else {
-                        let lock = resolve_lock(&input, &resolver_environments, &freshness).await?;
-                        lock.write()?;
-                        (lock, true)
+                    match LockFile::read(&input.pylock_path) {
+                        Ok(lock) if lock.is_fresh_for(&freshness, &lock_targets) => (lock, false),
+                        Ok(_) | Err(ProjectError::ParseLockfile { .. }) => {
+                            // Default sync owns lock freshness and regeneration,
+                            // so an outdated or no-longer-readable lock is
+                            // treated the same as a stale one here.
+                            let lock =
+                                resolve_lock(&input, &resolver_environments, &freshness).await?;
+                            lock.write()?;
+                            (lock, true)
+                        }
+                        Err(error) => return Err(error),
                     }
                 } else {
                     let lock = resolve_lock(&input, &resolver_environments, &freshness).await?;
@@ -561,6 +566,41 @@ async fn resolve_lock(
     environments: &[ResolverEnvironment],
     freshness: &LockFreshness,
 ) -> Result<LockFile, ProjectError> {
+    if environments.len() == 1 {
+        let environment = &environments[0];
+        let request = ResolutionRequestTemplate::new(
+            build_resolution_roots(input),
+            freshness.index_url.clone(),
+        )
+        .for_environment(environment.clone());
+        let packages = Resolver::new()
+            .resolve(request)
+            .await
+            .map_err(|source| ProjectError::ResolveDependencies { source })?
+            .into_iter()
+            .map(|package| map_resolved_package(package, &freshness.index_url))
+            .collect::<Vec<_>>();
+
+        return Ok(LockFile {
+            path: input.pylock_path.clone(),
+            requires_python: input.requires_python.clone(),
+            environments: vec![lock_environment(environment)],
+            extras: input
+                .optional_dependencies
+                .iter()
+                .map(|extra| extra.name.normalized_name.clone())
+                .collect(),
+            dependency_groups: input
+                .dependency_groups
+                .iter()
+                .map(|group| group.name.normalized_name.clone())
+                .collect(),
+            default_groups: default_group_names(input),
+            packages,
+            tool_pyra: freshness.clone(),
+        });
+    }
+
     resolve_lock_for_environments(input, environments, freshness).await
 }
 

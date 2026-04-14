@@ -19,6 +19,8 @@ pub const CURRENT_RESOLUTION_STRATEGY: &str = "environment-scoped-union-v1";
 /// Multi-target lock generation resolves each target independently and merges
 /// only the compatible shared package graph into one lock.
 pub const MULTI_TARGET_RESOLUTION_STRATEGY: &str = "environment-scoped-matrix-v1";
+const SUPPORTED_LOCK_VERSION: &str = "1.0";
+const SUPPORTED_CREATED_BY: &str = "pyra";
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct LockArtifact {
@@ -103,15 +105,10 @@ impl LockFile {
                     path: path.to_string(),
                     detail: error.to_string(),
                 })?;
-
-        let packages = document
-            .as_table()
-            .get("packages")
-            .and_then(Item::as_array_of_tables)
-            .ok_or_else(|| ProjectError::ParseLockfile {
-                path: path.to_string(),
-                detail: "missing [[packages]]".to_string(),
-            })?;
+        validate_top_level_metadata(&document).map_err(|detail| ProjectError::ParseLockfile {
+            path: path.to_string(),
+            detail,
+        })?;
 
         let tool_pyra =
             parse_tool_pyra(&document).map_err(|detail| ProjectError::ParseLockfile {
@@ -149,14 +146,12 @@ impl LockFile {
             extras,
             dependency_groups,
             default_groups,
-            packages: packages
-                .iter()
-                .map(parse_package)
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|detail| ProjectError::ParseLockfile {
+            packages: parse_packages(document.as_table().get("packages")).map_err(|detail| {
+                ProjectError::ParseLockfile {
                     path: path.to_string(),
                     detail,
-                })?,
+                }
+            })?,
             tool_pyra,
         })
     }
@@ -298,6 +293,32 @@ fn write_artifact_body(output: &mut String, artifact: &LockArtifact) {
     writeln!(output, "hashes = {{ sha256 = {:?} }}", artifact.sha256).expect("string write");
 }
 
+fn validate_top_level_metadata(document: &DocumentMut) -> Result<(), String> {
+    let lock_version = document
+        .as_table()
+        .get("lock-version")
+        .and_then(Item::as_str)
+        .ok_or_else(|| "missing lock-version".to_string())?;
+    if lock_version != SUPPORTED_LOCK_VERSION {
+        return Err(format!(
+            "unsupported lock-version `{lock_version}`; expected `{SUPPORTED_LOCK_VERSION}`"
+        ));
+    }
+
+    let created_by = document
+        .as_table()
+        .get("created-by")
+        .and_then(Item::as_str)
+        .ok_or_else(|| "missing created-by".to_string())?;
+    if created_by != SUPPORTED_CREATED_BY {
+        return Err(format!(
+            "unsupported created-by `{created_by}`; expected `{SUPPORTED_CREATED_BY}`"
+        ));
+    }
+
+    Ok(())
+}
+
 fn string_array(item: Option<&Item>) -> Result<Vec<String>, String> {
     let Some(item) = item else {
         return Ok(Vec::new());
@@ -353,6 +374,19 @@ fn parse_environments(
             .collect();
     }
     Err("expected environments array or array-of-tables".to_string())
+}
+
+fn parse_packages(item: Option<&Item>) -> Result<Vec<LockPackage>, String> {
+    let Some(item) = item else {
+        // Empty dependency graphs are still valid resolved state, so the
+        // current writer omits `[[packages]]` entirely in that case.
+        return Ok(Vec::new());
+    };
+    let Some(packages) = item.as_array_of_tables() else {
+        return Err("expected [[packages]] array-of-tables".to_string());
+    };
+
+    packages.iter().map(parse_package).collect()
 }
 
 fn parse_package(table: &Table) -> Result<LockPackage, String> {
@@ -488,6 +522,19 @@ fn parse_tool_pyra(document: &DocumentMut) -> Result<LockFreshness, String> {
         .and_then(Item::as_table)
         .ok_or_else(|| "missing [tool.pyra]".to_string())?;
 
+    let resolution_strategy = table
+        .get("resolution-strategy")
+        .and_then(Item::as_str)
+        .ok_or_else(|| "missing tool.pyra resolution-strategy".to_string())?
+        .to_string();
+    if resolution_strategy != CURRENT_RESOLUTION_STRATEGY
+        && resolution_strategy != MULTI_TARGET_RESOLUTION_STRATEGY
+    {
+        return Err(format!(
+            "unsupported tool.pyra resolution-strategy `{resolution_strategy}`"
+        ));
+    }
+
     Ok(LockFreshness {
         dependency_fingerprint: table
             .get("input-fingerprint")
@@ -509,11 +556,7 @@ fn parse_tool_pyra(document: &DocumentMut) -> Result<LockFreshness, String> {
             .and_then(Item::as_str)
             .ok_or_else(|| "missing tool.pyra index-url".to_string())?
             .to_string(),
-        resolution_strategy: table
-            .get("resolution-strategy")
-            .and_then(Item::as_str)
-            .ok_or_else(|| "missing tool.pyra resolution-strategy".to_string())?
-            .to_string(),
+        resolution_strategy,
     })
 }
 
@@ -659,14 +702,13 @@ resolution-strategy = "environment-scoped-union-v1"
             path.as_std_path(),
             r#"
 lock-version = "1.0"
-
-[[environments]]
-marker = "sys_platform == 'darwin'"
-
 extras = []
 dependency-groups = []
 default-groups = []
 created-by = "pyra"
+
+[[environments]]
+marker = "sys_platform == 'darwin'"
 
 [[packages]]
 name = "attrs"
@@ -700,15 +742,14 @@ resolution-strategy = "environment-scoped-union-v1"
             path.as_std_path(),
             r#"
 lock-version = "1.0"
-
-[[environments]]
-id = "cpython-3.13.12-aarch64-apple-darwin"
-marker = "sys_platform == 'darwin'"
-
 extras = []
 dependency-groups = []
 default-groups = []
 created-by = "pyra"
+
+[[environments]]
+id = "cpython-3.13.12-aarch64-apple-darwin"
+marker = "sys_platform == 'darwin'"
 
 [[packages]]
 name = "attrs"
@@ -729,6 +770,136 @@ resolution-strategy = "environment-scoped-union-v1"
         assert_eq!(lock.environments.len(), 1);
         assert_eq!(lock.environments[0].interpreter_version, "3.13.12");
         assert_eq!(lock.environments[0].target_triple, "aarch64-apple-darwin");
+    }
+
+    #[test]
+    fn round_trips_empty_lock_without_packages() {
+        let temp_dir = tempfile::tempdir().expect("temporary directory");
+        let path =
+            Utf8PathBuf::from_path_buf(temp_dir.path().join("pylock.toml")).expect("utf-8 path");
+        let mut lock = sample_lock(path.clone());
+        lock.packages.clear();
+
+        lock.write().expect("write lock");
+        let rendered = fs::read_to_string(path.as_std_path()).expect("rendered lock");
+        let reread = LockFile::read(&path).expect("read lock");
+
+        assert!(!rendered.contains("[[packages]]"));
+        assert_eq!(reread, lock);
+    }
+
+    #[test]
+    fn parses_minimal_current_schema_lock_without_packages() {
+        let temp_dir = tempfile::tempdir().expect("temporary directory");
+        let path =
+            Utf8PathBuf::from_path_buf(temp_dir.path().join("pylock.toml")).expect("utf-8 path");
+        fs::write(
+            path.as_std_path(),
+            r#"
+lock-version = "1.0"
+extras = []
+dependency-groups = []
+default-groups = ["pyra-default"]
+created-by = "pyra"
+
+[[environments]]
+id = "cpython-3.13.12-aarch64-apple-darwin"
+marker = "implementation_name == 'cpython' and python_full_version == '3.13.12' and sys_platform == 'darwin' and platform_machine == 'arm64'"
+interpreter-version = "3.13.12"
+target-triple = "aarch64-apple-darwin"
+
+[tool.pyra]
+input-fingerprint = "fingerprint"
+interpreter-version = "3.13.12"
+target-triple = "aarch64-apple-darwin"
+index-url = "https://pypi.org/simple"
+resolution-strategy = "environment-scoped-union-v1"
+"#,
+        )
+        .expect("write minimal lock");
+
+        let lock = LockFile::read(&path).expect("read lock");
+
+        assert!(lock.packages.is_empty());
+        assert_eq!(lock.environments.len(), 1);
+    }
+
+    #[test]
+    fn rejects_unsupported_lock_version() {
+        let temp_dir = tempfile::tempdir().expect("temporary directory");
+        let path =
+            Utf8PathBuf::from_path_buf(temp_dir.path().join("pylock.toml")).expect("utf-8 path");
+        fs::write(
+            path.as_std_path(),
+            r#"
+lock-version = "2.0"
+extras = []
+dependency-groups = []
+default-groups = ["pyra-default"]
+created-by = "pyra"
+
+[[environments]]
+id = "cpython-3.13.12-aarch64-apple-darwin"
+marker = "sys_platform == 'darwin'"
+interpreter-version = "3.13.12"
+target-triple = "aarch64-apple-darwin"
+
+[tool.pyra]
+input-fingerprint = "fingerprint"
+interpreter-version = "3.13.12"
+target-triple = "aarch64-apple-darwin"
+index-url = "https://pypi.org/simple"
+resolution-strategy = "environment-scoped-union-v1"
+"#,
+        )
+        .expect("write invalid lock");
+
+        let error = LockFile::read(&path).expect_err("invalid lock");
+        match error {
+            crate::ProjectError::ParseLockfile { detail, .. } => {
+                assert!(detail.contains("unsupported lock-version"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_unsupported_resolution_strategy() {
+        let temp_dir = tempfile::tempdir().expect("temporary directory");
+        let path =
+            Utf8PathBuf::from_path_buf(temp_dir.path().join("pylock.toml")).expect("utf-8 path");
+        fs::write(
+            path.as_std_path(),
+            r#"
+lock-version = "1.0"
+extras = []
+dependency-groups = []
+default-groups = ["pyra-default"]
+created-by = "pyra"
+
+[[environments]]
+id = "cpython-3.13.12-aarch64-apple-darwin"
+marker = "sys_platform == 'darwin'"
+interpreter-version = "3.13.12"
+target-triple = "aarch64-apple-darwin"
+
+[tool.pyra]
+input-fingerprint = "fingerprint"
+interpreter-version = "3.13.12"
+target-triple = "aarch64-apple-darwin"
+index-url = "https://pypi.org/simple"
+resolution-strategy = "environment-scoped-future-v9"
+"#,
+        )
+        .expect("write invalid lock");
+
+        let error = LockFile::read(&path).expect_err("invalid lock");
+        match error {
+            crate::ProjectError::ParseLockfile { detail, .. } => {
+                assert!(detail.contains("unsupported tool.pyra resolution-strategy"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]

@@ -150,6 +150,59 @@ python = "3.13.12"
 }
 
 #[test]
+fn sync_reuses_empty_lock_without_parse_failure() {
+    let home = temp_env_root();
+    let project_root = home
+        .path()
+        .join("workspace")
+        .join("sample-sync-empty-lock-reuse");
+    fs::create_dir_all(&project_root).expect("project root");
+    let python_version = system_python_version().expect("system python version");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        format!(
+            r#"[project]
+name = "sample-sync-empty-lock-reuse"
+version = "0.1.0"
+dependencies = []
+
+[tool.pyra]
+python = "{python_version}"
+"#,
+        ),
+    )
+    .expect("pyproject");
+
+    let managed_env = home.path().join("managed-python");
+    create_virtualenv(&system_python().expect("system python"), &managed_env)
+        .expect("managed virtualenv");
+    let managed_python = venv_python_path(&managed_env);
+    seed_managed_install_with_executable(&home, &python_version, &managed_python)
+        .expect("managed install");
+    let state_path = home.path().join("installer-state.json");
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .args(["sync"])
+        .assert()
+        .success()
+        .stdout(contains("Updated `pylock.toml`"));
+
+    let first_lock = fs::read_to_string(project_root.join("pylock.toml")).expect("pylock");
+    assert!(!first_lock.contains("[[packages]]"));
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .args(["sync"])
+        .assert()
+        .success()
+        .stdout(contains("Reused the current lock"));
+
+    let second_lock = fs::read_to_string(project_root.join("pylock.toml")).expect("pylock");
+    assert_eq!(first_lock, second_lock);
+}
+
+#[test]
 fn sync_inspects_environment_without_pip_list() {
     let home = temp_env_root();
     let project_root = home
@@ -1121,6 +1174,48 @@ python = "3.13.12"
 }
 
 #[test]
+fn add_resolves_click_fixture_end_to_end() {
+    let home = temp_env_root();
+    let index = start_fixture_index();
+    let project_root = home.path().join("workspace").join("sample-add-click");
+    fs::create_dir_all(&project_root).expect("project root");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        r#"[project]
+name = "sample-add-click"
+version = "0.1.0"
+requires-python = "==3.13.*"
+dependencies = []
+
+[tool.pyra]
+python = "3.13.12"
+"#,
+    )
+    .expect("pyproject");
+
+    seed_managed_install(&home, "3.13.12").expect("managed install");
+    let state_path = home.path().join("installer-state.json");
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .env("PYRA_INDEX_URL", &index.base_url)
+        .args(["add", "click"])
+        .assert()
+        .success()
+        .stdout(contains("Added `click`"));
+
+    let pyproject = fs::read_to_string(project_root.join("pyproject.toml")).expect("pyproject");
+    assert!(pyproject.contains("dependencies = [\"click\"]"));
+
+    let lock = fs::read_to_string(project_root.join("pylock.toml")).expect("pylock");
+    assert!(lock.contains("name = \"click\""));
+    assert!(lock.contains("version = \"8.1.7\""));
+
+    let state = read_state(&state_path);
+    assert_eq!(state.get("click"), Some(&"8.1.7".to_string()));
+}
+
+#[test]
 fn add_updates_dependency_group_in_pyproject() {
     let home = temp_env_root();
     let index = start_fixture_index();
@@ -1201,6 +1296,121 @@ python = "3.13.12"
 
     let state = read_state(&state_path);
     assert!(!state.contains_key("httpx"));
+}
+
+#[test]
+fn sync_resolves_urllib3_fixture_end_to_end() {
+    let home = temp_env_root();
+    let index = start_fixture_index();
+    let project_root = home.path().join("workspace").join("sample-sync-urllib3");
+    fs::create_dir_all(&project_root).expect("project root");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        r#"[project]
+name = "sample-sync-urllib3"
+version = "0.1.0"
+requires-python = "==3.13.*"
+dependencies = ["urllib3"]
+
+[tool.pyra]
+python = "3.13.12"
+"#,
+    )
+    .expect("pyproject");
+
+    seed_managed_install(&home, "3.13.12").expect("managed install");
+    let state_path = home.path().join("installer-state.json");
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .env("PYRA_INDEX_URL", &index.base_url)
+        .args(["sync"])
+        .assert()
+        .success();
+
+    let state = read_state(&state_path);
+    assert_eq!(state.get("urllib3"), Some(&"2.2.1".to_string()));
+}
+
+#[test]
+fn sync_resolves_requests_extra_fixture_end_to_end() {
+    let home = temp_env_root();
+    let index = start_fixture_index();
+    let project_root = home
+        .path()
+        .join("workspace")
+        .join("sample-sync-requests-extra");
+    fs::create_dir_all(&project_root).expect("project root");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        r#"[project]
+name = "sample-sync-requests-extra"
+version = "0.1.0"
+requires-python = "==3.13.*"
+dependencies = ["requests[socks]"]
+
+[tool.pyra]
+python = "3.13.12"
+"#,
+    )
+    .expect("pyproject");
+
+    seed_managed_install(&home, "3.13.12").expect("managed install");
+    let state_path = home.path().join("installer-state.json");
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .env("PYRA_INDEX_URL", &index.base_url)
+        .args(["sync"])
+        .assert()
+        .success();
+
+    let state = read_state(&state_path);
+    assert_eq!(state.get("requests"), Some(&"2.32.3".to_string()));
+    assert_eq!(state.get("urllib3"), Some(&"2.2.1".to_string()));
+    assert_eq!(state.get("pysocks"), Some(&"1.7.1".to_string()));
+}
+
+#[test]
+fn sync_falls_back_to_sdist_fixture_end_to_end() {
+    let home = temp_env_root();
+    let index = start_fixture_index();
+    let project_root = home
+        .path()
+        .join("workspace")
+        .join("sample-sync-sdist-fallback");
+    fs::create_dir_all(&project_root).expect("project root");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        r#"[project]
+name = "sample-sync-sdist-fallback"
+version = "0.1.0"
+requires-python = "==3.13.*"
+dependencies = ["sdistonly"]
+
+[tool.pyra]
+python = "3.13.12"
+"#,
+    )
+    .expect("pyproject");
+
+    seed_managed_install(&home, "3.13.12").expect("managed install");
+    let state_path = home.path().join("installer-state.json");
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .env("PYRA_INDEX_URL", &index.base_url)
+        .args(["sync"])
+        .assert()
+        .success();
+
+    let lock = fs::read_to_string(project_root.join("pylock.toml")).expect("pylock");
+    assert!(lock.contains("[packages.sdist]"));
+    assert!(lock.contains("name = \"sdistonly-1.2.3.tar.gz\""));
+
+    let state = read_state(&state_path);
+    assert_eq!(state.get("sdistonly"), Some(&"1.2.3".to_string()));
+    assert_eq!(state.get("shared"), Some(&"1.5.0".to_string()));
 }
 
 #[test]
@@ -1789,6 +1999,12 @@ fn start_fixture_index() -> FixtureIndex {
         "sphinx-7.0.0-py3-none-any.whl",
         "httpx-0.27.0-py3-none-any.whl",
         "anyio-4.4.0-py3-none-any.whl",
+        "click-8.1.7-py3-none-any.whl",
+        "urllib3-2.2.1-py3-none-any.whl",
+        "requests-2.32.3-py3-none-any.whl",
+        "pysocks-1.7.1-py3-none-any.whl",
+        "shared-1.5.0-py3-none-any.whl",
+        "sdistonly-1.2.3.tar.gz",
     ] {
         write_fixture_bytes(
             root.path(),
@@ -1796,66 +2012,46 @@ fn start_fixture_index() -> FixtureIndex {
             &fixture_artifact_bytes(file),
         );
     }
-    write_fixture_file(
-        root.path(),
-        "attrs.json",
-        fixture_project_json("attrs", root.path()),
-    );
-    write_fixture_file(
-        root.path(),
-        "pytest.json",
-        fixture_project_json("pytest", root.path()),
-    );
-    write_fixture_file(
-        root.path(),
-        "pluggy.json",
-        fixture_project_json("pluggy", root.path()),
-    );
-    write_fixture_file(
-        root.path(),
-        "sphinx.json",
-        fixture_project_json("sphinx", root.path()),
-    );
-    write_fixture_file(
-        root.path(),
-        "httpx.json",
-        fixture_project_json("httpx", root.path()),
-    );
-    write_fixture_file(
-        root.path(),
-        "anyio.json",
-        fixture_project_json("anyio", root.path()),
-    );
-    write_fixture_file(
-        root.path(),
-        "files/attrs-25.1.0-py3-none-any.whl.metadata",
-        fixture_metadata("attrs-25.1.0-py3-none-any.whl.metadata"),
-    );
-    write_fixture_file(
-        root.path(),
-        "files/pytest-8.3.0-py3-none-any.whl.metadata",
-        fixture_metadata("pytest-8.3.0-py3-none-any.whl.metadata"),
-    );
-    write_fixture_file(
-        root.path(),
-        "files/pluggy-1.5.0-py3-none-any.whl.metadata",
-        fixture_metadata("pluggy-1.5.0-py3-none-any.whl.metadata"),
-    );
-    write_fixture_file(
-        root.path(),
-        "files/sphinx-7.0.0-py3-none-any.whl.metadata",
-        fixture_metadata("sphinx-7.0.0-py3-none-any.whl.metadata"),
-    );
-    write_fixture_file(
-        root.path(),
-        "files/httpx-0.27.0-py3-none-any.whl.metadata",
-        fixture_metadata("httpx-0.27.0-py3-none-any.whl.metadata"),
-    );
-    write_fixture_file(
-        root.path(),
-        "files/anyio-4.4.0-py3-none-any.whl.metadata",
-        fixture_metadata("anyio-4.4.0-py3-none-any.whl.metadata"),
-    );
+    for package in [
+        "attrs",
+        "pytest",
+        "pluggy",
+        "sphinx",
+        "httpx",
+        "anyio",
+        "click",
+        "urllib3",
+        "requests",
+        "pysocks",
+        "shared",
+        "sdistonly",
+    ] {
+        write_fixture_file(
+            root.path(),
+            &format!("{package}.json"),
+            fixture_project_json(package, root.path()),
+        );
+    }
+    for metadata in [
+        "attrs-25.1.0-py3-none-any.whl.metadata",
+        "pytest-8.3.0-py3-none-any.whl.metadata",
+        "pluggy-1.5.0-py3-none-any.whl.metadata",
+        "sphinx-7.0.0-py3-none-any.whl.metadata",
+        "httpx-0.27.0-py3-none-any.whl.metadata",
+        "anyio-4.4.0-py3-none-any.whl.metadata",
+        "click-8.1.7-py3-none-any.whl.metadata",
+        "urllib3-2.2.1-py3-none-any.whl.metadata",
+        "requests-2.32.3-py3-none-any.whl.metadata",
+        "pysocks-1.7.1-py3-none-any.whl.metadata",
+        "shared-1.5.0-py3-none-any.whl.metadata",
+        "sdistonly-1.2.3.tar.gz.metadata",
+    ] {
+        write_fixture_file(
+            root.path(),
+            &format!("files/{metadata}"),
+            fixture_metadata(metadata),
+        );
+    }
 
     FixtureIndex {
         base_url: format!("file://{}", root.path().to_string_lossy()),
@@ -1970,6 +2166,12 @@ fn fixture_project_json(package: &str, root: &Path) -> String {
         "sphinx" => "sphinx-7.0.0-py3-none-any.whl",
         "httpx" => "httpx-0.27.0-py3-none-any.whl",
         "anyio" => "anyio-4.4.0-py3-none-any.whl",
+        "click" => "click-8.1.7-py3-none-any.whl",
+        "urllib3" => "urllib3-2.2.1-py3-none-any.whl",
+        "requests" => "requests-2.32.3-py3-none-any.whl",
+        "pysocks" => "pysocks-1.7.1-py3-none-any.whl",
+        "shared" => "shared-1.5.0-py3-none-any.whl",
+        "sdistonly" => "sdistonly-1.2.3.tar.gz",
         other => panic!("unexpected package {other}"),
     };
     serde_json::json!({
@@ -2036,6 +2238,26 @@ fn fixture_metadata(filename: &str) -> String {
         "anyio-4.4.0-py3-none-any.whl.metadata" => {
             "Metadata-Version: 2.3\nName: anyio\nVersion: 4.4.0\n".to_string()
         }
+        "click-8.1.7-py3-none-any.whl.metadata" => {
+            "Metadata-Version: 2.3\nName: click\nVersion: 8.1.7\n".to_string()
+        }
+        "urllib3-2.2.1-py3-none-any.whl.metadata" => {
+            "Metadata-Version: 2.3\nName: urllib3\nVersion: 2.2.1\n".to_string()
+        }
+        "requests-2.32.3-py3-none-any.whl.metadata" => {
+            "Metadata-Version: 2.3\nName: requests\nVersion: 2.32.3\nRequires-Dist: urllib3==2.2.1\nRequires-Dist: pysocks==1.7.1; extra == 'socks'\n"
+                .to_string()
+        }
+        "pysocks-1.7.1-py3-none-any.whl.metadata" => {
+            "Metadata-Version: 2.3\nName: pysocks\nVersion: 1.7.1\n".to_string()
+        }
+        "shared-1.5.0-py3-none-any.whl.metadata" => {
+            "Metadata-Version: 2.3\nName: shared\nVersion: 1.5.0\n".to_string()
+        }
+        "sdistonly-1.2.3.tar.gz.metadata" => {
+            "Metadata-Version: 2.3\nName: sdistonly\nVersion: 1.2.3\nRequires-Dist: shared==1.5.0\n"
+                .to_string()
+        }
         "alpha-1.0.0-py3-none-any.whl.metadata" => {
             "Metadata-Version: 2.3\nName: alpha\nVersion: 1.0.0\nRequires-Dist: shared<2\n"
                 .to_string()
@@ -2043,9 +2265,6 @@ fn fixture_metadata(filename: &str) -> String {
         "bravo-1.0.0-py3-none-any.whl.metadata" => {
             "Metadata-Version: 2.3\nName: bravo\nVersion: 1.0.0\nRequires-Dist: shared>=2\n"
                 .to_string()
-        }
-        "shared-1.5.0-py3-none-any.whl.metadata" => {
-            "Metadata-Version: 2.3\nName: shared\nVersion: 1.5.0\n".to_string()
         }
         "shared-2.0.0-py3-none-any.whl.metadata" => {
             "Metadata-Version: 2.3\nName: shared\nVersion: 2.0.0\n".to_string()
