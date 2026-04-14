@@ -29,12 +29,12 @@ Current guarantees:
 Current minimal scope:
 
 - one run target is accepted
+- remaining CLI arguments are forwarded to the child process
 - lookup order is:
   1. `[project.scripts]`
   2. console scripts from installed packages
   3. `.py` file fallback
 - child exit codes are returned from `pyra run`
-- no extra argument passthrough is implemented yet
 
 ## Lookup Order
 

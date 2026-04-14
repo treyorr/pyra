@@ -86,6 +86,7 @@ pub struct RemoveProjectOutcome {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct RunProjectRequest {
     pub target: String,
+    pub args: Vec<String>,
 }
 
 /// Outcome for `pyra run`, including the child process exit code.
@@ -240,6 +241,7 @@ impl ProjectService {
                 context,
                 ProjectExecutionRequest {
                     target: request.target,
+                    args: request.args,
                 },
             )
             .await?;

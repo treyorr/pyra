@@ -14,6 +14,7 @@ pub async fn execute(
             context,
             RunProjectRequest {
                 target: args.target,
+                args: args.args,
             },
         )
         .await?;

@@ -28,13 +28,17 @@ import sys
 module_name = sys.argv[1]
 callable_path = sys.argv[2]
 script_name = sys.argv[3]
+script_args = sys.argv[4:]
 
 module = importlib.import_module(module_name)
 target = module
 for segment in callable_path.split("."):
     target = getattr(target, segment)
 
-sys.argv = [script_name]
+# Rebuild sys.argv so project entrypoints see the same contract as direct
+# script execution: argv[0] is the script name and the remaining values are
+# the forwarded child arguments from `pyra run`.
+sys.argv = [script_name, *script_args]
 result = target()
 raise SystemExit(0 if result is None else result)
 "#;
@@ -44,6 +48,7 @@ raise SystemExit(0 if result is None else result)
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct ProjectExecutionRequest {
     pub target: String,
+    pub args: Vec<String>,
 }
 
 /// Outcome for one execution request.
@@ -63,6 +68,7 @@ struct ProjectExecutionContext {
     project_root: Utf8PathBuf,
     environment: ProjectEnvironmentRecord,
     plan: ProjectExecutionPlan,
+    args: Vec<String>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -97,7 +103,7 @@ impl ProjectExecutionService {
         let sync = ProjectService
             .sync(context, SyncProjectRequest::default())
             .await?;
-        let execution = self.assemble_context(context, &sync, &request.target)?;
+        let execution = self.assemble_context(context, &sync, &request.target, request.args)?;
 
         Ok(ProjectExecutionOutcome {
             exit_code: execution.execute()?,
@@ -109,6 +115,7 @@ impl ProjectExecutionService {
         context: &AppContext,
         sync: &SyncProjectOutcome,
         target: &str,
+        args: Vec<String>,
     ) -> Result<ProjectExecutionContext, ProjectError> {
         let input = ProjectSyncInputLoader.load(context)?;
         let identity = input.project_identity()?;
@@ -133,14 +140,18 @@ impl ProjectExecutionService {
             project_root: sync.project_root.clone(),
             environment,
             plan,
+            args,
         })
     }
 }
 
 impl ProjectExecutionContext {
     fn execute(&self) -> Result<i32, ProjectError> {
-        self.plan
-            .execute(&self.environment.interpreter_path, &self.project_root)
+        self.plan.execute(
+            &self.environment.interpreter_path,
+            &self.project_root,
+            &self.args,
+        )
     }
 }
 
@@ -183,38 +194,48 @@ impl ProjectExecutionPlan {
         &self,
         interpreter_path: &Utf8Path,
         project_root: &Utf8Path,
+        args: &[String],
     ) -> Result<i32, ProjectError> {
         let status = match &self.target {
             ResolvedRunTarget::ProjectScript {
                 script_name,
                 module,
                 callable_path,
-            } => Command::new(interpreter_path.as_std_path())
-                .arg("-c")
-                .arg(PROJECT_SCRIPT_RUNNER)
-                .arg(module)
-                .arg(callable_path)
-                .arg(script_name)
-                .current_dir(project_root.as_std_path())
-                .status()
-                .map_err(|source| ProjectError::StartRunTarget {
-                    target: script_name.clone(),
-                    source,
-                })?,
+            } => {
+                let mut command = Command::new(interpreter_path.as_std_path());
+                command
+                    .arg("-c")
+                    .arg(PROJECT_SCRIPT_RUNNER)
+                    .arg(module)
+                    .arg(callable_path)
+                    .arg(script_name)
+                    .args(args)
+                    .current_dir(project_root.as_std_path());
+                command
+                    .status()
+                    .map_err(|source| ProjectError::StartRunTarget {
+                        target: script_name.clone(),
+                        source,
+                    })?
+            }
             ResolvedRunTarget::ConsoleScript { executable_path } => {
                 let target = executable_path
                     .file_name()
                     .unwrap_or(executable_path.as_str())
                     .to_string();
-                Command::new(executable_path.as_std_path())
-                    .current_dir(project_root.as_std_path())
+                let mut command = Command::new(executable_path.as_std_path());
+                command.args(args).current_dir(project_root.as_std_path());
+                command
                     .status()
                     .map_err(|source| ProjectError::StartRunTarget { target, source })?
             }
             ResolvedRunTarget::PythonFile { script_path } => {
-                Command::new(interpreter_path.as_std_path())
+                let mut command = Command::new(interpreter_path.as_std_path());
+                command
                     .arg(script_path.as_std_path())
-                    .current_dir(project_root.as_std_path())
+                    .args(args)
+                    .current_dir(project_root.as_std_path());
+                command
                     .status()
                     .map_err(|source| ProjectError::StartRunTarget {
                         target: script_path.to_string(),
@@ -407,7 +428,7 @@ python = "{python_version}"
         seed_managed_install(&context, &python_version).expect("managed install");
 
         let execution = ProjectExecutionService
-            .assemble_context(&context, &sync_outcome(&root), "hello.py")
+            .assemble_context(&context, &sync_outcome(&root), "hello.py", Vec::new())
             .expect("execution context");
 
         assert_eq!(execution.project_root, root);
@@ -467,7 +488,7 @@ python = "{python_version}"
         fs::write(scripts_dir.join("demo"), "").expect("console script");
 
         let execution = ProjectExecutionService
-            .assemble_context(&context, &sync_outcome(&root), "demo")
+            .assemble_context(&context, &sync_outcome(&root), "demo", Vec::new())
             .expect("execution context");
 
         assert_eq!(

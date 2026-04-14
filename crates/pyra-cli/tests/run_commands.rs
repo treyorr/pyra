@@ -135,6 +135,48 @@ python = "{python_version}"
 }
 
 #[test]
+fn run_passes_arguments_through_to_project_scripts() {
+    let home = temp_env_root();
+    let project_root = home
+        .path()
+        .join("workspace")
+        .join("sample-run-project-script-args");
+    fs::create_dir_all(&project_root).expect("project root");
+    let python_version = system_python_version().expect("system python version");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        format!(
+            r#"[project]
+name = "sample-run-project-script-args"
+version = "0.1.0"
+dependencies = []
+
+[project.scripts]
+demo = "app:main"
+
+[tool.pyra]
+python = "{python_version}"
+"#,
+        ),
+    )
+    .expect("pyproject");
+    fs::write(
+        project_root.join("app.py"),
+        "import json\nimport sys\n\ndef main():\n    print(json.dumps(sys.argv))\n    return 0\n",
+    )
+    .expect("app module");
+
+    seed_managed_install(&home, &python_version).expect("managed install");
+
+    base_command(&home)
+        .current_dir(&project_root)
+        .args(["run", "demo", "alpha", "--flag", "-x"])
+        .assert()
+        .success()
+        .stdout(contains("[\"demo\", \"alpha\", \"--flag\", \"-x\"]"));
+}
+
+#[test]
 fn run_syncs_the_project_before_execution() {
     let home = temp_env_root();
     let project_root = home.path().join("workspace").join("sample-run-sync-first");

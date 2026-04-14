@@ -143,7 +143,11 @@ pub struct SyncArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(trailing_var_arg = true)]
 pub struct RunArgs {
     /// Project script, installed console script, or `.py` file to execute.
     pub target: String,
+    /// Arguments forwarded unchanged to the executed child process.
+    #[arg(allow_hyphen_values = true)]
+    pub args: Vec<String>,
 }
