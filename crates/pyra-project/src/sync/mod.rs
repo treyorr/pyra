@@ -15,7 +15,7 @@ mod selection;
 pub use install::{EnvironmentInstaller, ReconciliationPlan};
 pub use lockfile::{
     CURRENT_RESOLUTION_STRATEGY, LockArtifact, LockDependencyRef, LockEnvironment, LockFile,
-    LockFreshness, LockPackage, LockSelection,
+    LockFreshness, LockPackage, LockSelection, MULTI_TARGET_RESOLUTION_STRATEGY,
 };
 pub(crate) use marker::{LockMarker, LockMarkerClause};
 pub use project_input::{ProjectSyncInput, ProjectSyncInputLoader};

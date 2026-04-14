@@ -16,6 +16,9 @@ use super::LockMarker;
 /// grow toward multiple environment slices without changing package metadata
 /// or selection rules again first.
 pub const CURRENT_RESOLUTION_STRATEGY: &str = "environment-scoped-union-v1";
+/// Multi-target lock generation resolves each target independently and merges
+/// only the compatible shared package graph into one lock.
+pub const MULTI_TARGET_RESOLUTION_STRATEGY: &str = "environment-scoped-matrix-v1";
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct LockArtifact {
@@ -59,6 +62,10 @@ pub struct LockEnvironment {
     pub id: String,
     /// Marker describing when this environment slice applies.
     pub marker: String,
+    /// Interpreter version used when this environment slice was resolved.
+    pub interpreter_version: String,
+    /// Target triple used when this environment slice was resolved.
+    pub target_triple: String,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -102,12 +109,15 @@ impl LockFile {
                 detail: "missing [[packages]]".to_string(),
             })?;
 
-        let environments =
-            parse_environments(document.as_table().get("environments")).map_err(|detail| {
-                ProjectError::ParseLockfile {
-                    path: path.to_string(),
-                    detail,
-                }
+        let tool_pyra =
+            parse_tool_pyra(&document).map_err(|detail| ProjectError::ParseLockfile {
+                path: path.to_string(),
+                detail,
+            })?;
+        let environments = parse_environments(document.as_table().get("environments"), &tool_pyra)
+            .map_err(|detail| ProjectError::ParseLockfile {
+                path: path.to_string(),
+                detail,
             })?;
         let extras = string_array(document.as_table().get("extras")).map_err(|detail| {
             ProjectError::ParseLockfile {
@@ -143,12 +153,7 @@ impl LockFile {
                     path: path.to_string(),
                     detail,
                 })?,
-            tool_pyra: parse_tool_pyra(&document).map_err(|detail| {
-                ProjectError::ParseLockfile {
-                    path: path.to_string(),
-                    detail,
-                }
-            })?,
+            tool_pyra,
         })
     }
 
@@ -247,6 +252,13 @@ fn write_environments(output: &mut String, environments: &[LockEnvironment]) {
         writeln!(output, "[[environments]]").expect("string write");
         writeln!(output, "id = {:?}", environment.id).expect("string write");
         writeln!(output, "marker = {:?}", environment.marker).expect("string write");
+        writeln!(
+            output,
+            "interpreter-version = {:?}",
+            environment.interpreter_version
+        )
+        .expect("string write");
+        writeln!(output, "target-triple = {:?}", environment.target_triple).expect("string write");
     }
 }
 
@@ -286,12 +298,18 @@ fn string_value(item: Option<&Item>) -> Option<String> {
     item.and_then(Item::as_str).map(ToString::to_string)
 }
 
-fn parse_environments(item: Option<&Item>) -> Result<Vec<LockEnvironment>, String> {
+fn parse_environments(
+    item: Option<&Item>,
+    tool_pyra: &LockFreshness,
+) -> Result<Vec<LockEnvironment>, String> {
     let Some(item) = item else {
         return Ok(Vec::new());
     };
     if let Some(array) = item.as_array_of_tables() {
-        return array.iter().map(parse_environment).collect();
+        return array
+            .iter()
+            .map(|table| parse_environment(table, tool_pyra))
+            .collect();
     }
     if let Some(array) = item.as_array() {
         // Legacy locks stored environments as a bare string array. Keep
@@ -306,6 +324,8 @@ fn parse_environments(item: Option<&Item>) -> Result<Vec<LockEnvironment>, Strin
                 Ok(LockEnvironment {
                     id: format!("legacy-env-{index}"),
                     marker: marker.to_string(),
+                    interpreter_version: tool_pyra.interpreter_version.clone(),
+                    target_triple: tool_pyra.target_triple.clone(),
                 })
             })
             .collect();
@@ -376,7 +396,7 @@ fn parse_package(table: &Table) -> Result<LockPackage, String> {
     })
 }
 
-fn parse_environment(table: &Table) -> Result<LockEnvironment, String> {
+fn parse_environment(table: &Table, tool_pyra: &LockFreshness) -> Result<LockEnvironment, String> {
     Ok(LockEnvironment {
         id: table
             .get("id")
@@ -387,6 +407,16 @@ fn parse_environment(table: &Table) -> Result<LockEnvironment, String> {
             .get("marker")
             .and_then(Item::as_str)
             .ok_or_else(|| "environment missing marker".to_string())?
+            .to_string(),
+        interpreter_version: table
+            .get("interpreter-version")
+            .and_then(Item::as_str)
+            .unwrap_or(&tool_pyra.interpreter_version)
+            .to_string(),
+        target_triple: table
+            .get("target-triple")
+            .and_then(Item::as_str)
+            .unwrap_or(&tool_pyra.target_triple)
             .to_string(),
     })
 }
@@ -473,7 +503,7 @@ mod tests {
 
     use super::{
         CURRENT_RESOLUTION_STRATEGY, LockArtifact, LockDependencyRef, LockEnvironment, LockFile,
-        LockFreshness, LockMarker, LockPackage,
+        LockFreshness, LockMarker, LockPackage, MULTI_TARGET_RESOLUTION_STRATEGY,
     };
     use crate::sync::LockMarkerClause;
 
@@ -505,10 +535,14 @@ mod tests {
             LockEnvironment {
                 id: "cpython-3.13.12-aarch64-apple-darwin".to_string(),
                 marker: "sys_platform == 'darwin' and platform_machine == 'arm64'".to_string(),
+                interpreter_version: "3.13.12".to_string(),
+                target_triple: "aarch64-apple-darwin".to_string(),
             },
             LockEnvironment {
                 id: "cpython-3.13.12-x86_64-unknown-linux-gnu".to_string(),
                 marker: "sys_platform == 'linux' and platform_machine == 'x86_64'".to_string(),
+                interpreter_version: "3.13.12".to_string(),
+                target_triple: "x86_64-unknown-linux-gnu".to_string(),
             },
         ];
 
@@ -635,6 +669,46 @@ resolution-strategy = "environment-scoped-union-v1"
     }
 
     #[test]
+    fn backfills_environment_metadata_from_top_level_freshness_for_older_locks() {
+        let temp_dir = tempfile::tempdir().expect("temporary directory");
+        let path =
+            Utf8PathBuf::from_path_buf(temp_dir.path().join("pylock.toml")).expect("utf-8 path");
+        fs::write(
+            path.as_std_path(),
+            r#"
+lock-version = "1.0"
+
+[[environments]]
+id = "cpython-3.13.12-aarch64-apple-darwin"
+marker = "sys_platform == 'darwin'"
+
+extras = []
+dependency-groups = []
+default-groups = []
+created-by = "pyra"
+
+[[packages]]
+name = "attrs"
+version = "25.1.0"
+
+[tool.pyra]
+input-fingerprint = "fingerprint"
+interpreter-version = "3.13.12"
+target-triple = "aarch64-apple-darwin"
+index-url = "https://pypi.org/simple"
+resolution-strategy = "environment-scoped-union-v1"
+"#,
+        )
+        .expect("write legacy lock");
+
+        let lock = LockFile::read(&path).expect("read legacy lock");
+
+        assert_eq!(lock.environments.len(), 1);
+        assert_eq!(lock.environments[0].interpreter_version, "3.13.12");
+        assert_eq!(lock.environments[0].target_triple, "aarch64-apple-darwin");
+    }
+
+    #[test]
     fn freshness_rejects_dependency_fingerprint_changes() {
         let mut freshness = sample_freshness();
         freshness.dependency_fingerprint = "different".to_string();
@@ -681,6 +755,8 @@ resolution-strategy = "environment-scoped-union-v1"
             environments: vec![LockEnvironment {
                 id: "cpython-3.13.12-aarch64-apple-darwin".to_string(),
                 marker: "sys_platform == 'darwin'".to_string(),
+                interpreter_version: "3.13.12".to_string(),
+                target_triple: "aarch64-apple-darwin".to_string(),
             }],
             extras: vec!["feature".to_string()],
             dependency_groups: vec!["dev".to_string()],
@@ -718,5 +794,13 @@ resolution-strategy = "environment-scoped-union-v1"
             index_url: "https://pypi.org/simple".to_string(),
             resolution_strategy: CURRENT_RESOLUTION_STRATEGY.to_string(),
         }
+    }
+
+    #[test]
+    fn multi_target_strategy_is_distinct_from_single_target_strategy() {
+        assert_ne!(
+            CURRENT_RESOLUTION_STRATEGY,
+            MULTI_TARGET_RESOLUTION_STRATEGY
+        );
     }
 }

@@ -8,6 +8,7 @@ mod marker;
 mod metadata;
 mod model;
 mod provider;
+mod request;
 mod simple;
 #[cfg(test)]
 mod test_support;
@@ -19,3 +20,4 @@ pub use model::{
     ArtifactKind, ArtifactRecord, PackageDependencyRecord, ResolutionRequest, ResolutionRoot,
     ResolutionRootToken, ResolutionRootTokenKind, ResolvedPackage, Resolver,
 };
+pub use request::ResolutionRequestTemplate;

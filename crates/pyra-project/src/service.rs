@@ -10,11 +10,10 @@ use camino::Utf8PathBuf;
 use pep508_rs::MarkerEnvironmentBuilder;
 use pep508_rs::Requirement;
 use pyra_core::AppContext;
-use pyra_python::{InstalledPythonRecord, PythonVersionRequest};
-use pyra_resolver::Resolver;
+use pyra_python::{InstalledPythonRecord, PythonVersion, PythonVersionRequest};
 use pyra_resolver::{
-    ResolutionRequest, ResolutionRoot, ResolutionRootToken, ResolutionRootTokenKind,
-    ResolverEnvironment,
+    ResolutionRequestTemplate, ResolutionRoot, ResolutionRootToken, ResolutionRootTokenKind,
+    Resolver, ResolverEnvironment,
 };
 use sha2::{Digest, Sha256};
 
@@ -31,8 +30,8 @@ use crate::{
     sync::{
         CURRENT_RESOLUTION_STRATEGY, EnvironmentInstaller, LockArtifact, LockDependencyRef,
         LockEnvironment, LockFile, LockFreshness, LockMarker, LockMarkerClause, LockPackage,
-        LockSelection, ProjectSyncInput, ProjectSyncInputLoader, ReconciliationPlan,
-        SyncSelectionRequest, SyncSelectionResolver,
+        LockSelection, MULTI_TARGET_RESOLUTION_STRATEGY, ProjectSyncInput, ProjectSyncInputLoader,
+        ReconciliationPlan, SyncSelectionRequest, SyncSelectionResolver,
     },
 };
 
@@ -407,25 +406,39 @@ fn selected_installation(
 fn resolver_environment(
     installation: &InstalledPythonRecord,
 ) -> Result<ResolverEnvironment, ProjectError> {
-    let release = installation.version.segments();
-    let python_full_version = installation.version.to_string();
+    resolver_environment_for_target(
+        &installation.version.to_string(),
+        &installation.target_triple,
+    )
+}
+
+fn resolver_environment_for_target(
+    python_full_version: &str,
+    target_triple: &str,
+) -> Result<ResolverEnvironment, ProjectError> {
+    let release = PythonVersion::parse(python_full_version)
+        .map_err(|source| ProjectError::InvalidManagedPythonVersion {
+            value: python_full_version.to_string(),
+            detail: source.to_string(),
+        })?
+        .segments();
     let python_version = if release.len() >= 2 {
         format!("{}.{}", release[0], release[1])
     } else {
-        python_full_version.clone()
+        python_full_version.to_string()
     };
     let (os_name, sys_platform, platform_system, platform_machine) =
-        marker_platform_fields(&installation.target_triple);
+        marker_platform_fields(target_triple);
     let markers = MarkerEnvironmentBuilder {
         implementation_name: "cpython",
-        implementation_version: &python_full_version,
+        implementation_version: python_full_version,
         os_name,
         platform_machine,
         platform_python_implementation: "CPython",
         platform_release: "",
         platform_system,
         platform_version: "",
-        python_full_version: &python_full_version,
+        python_full_version,
         python_version: &python_version,
         sys_platform,
     }
@@ -436,12 +449,8 @@ fn resolver_environment(
             detail: error.to_string(),
         },
     )?;
-    ResolverEnvironment::new(
-        markers,
-        python_full_version,
-        installation.target_triple.clone(),
-    )
-    .map_err(|error| ProjectError::ResolveDependencies { source: error })
+    ResolverEnvironment::new(markers, python_full_version, target_triple.to_string())
+        .map_err(|error| ProjectError::ResolveDependencies { source: error })
 }
 
 fn marker_platform_fields(
@@ -503,6 +512,72 @@ async fn resolve_lock(
     env: &ResolverEnvironment,
     freshness: &LockFreshness,
 ) -> Result<LockFile, ProjectError> {
+    resolve_lock_for_environments(input, std::slice::from_ref(env), freshness).await
+}
+
+/// Multi-target lock generation resolves one environment at a time so the
+/// existing resolver contract stays unchanged. The current merge step is
+/// intentionally strict: only identical package graphs are merged until
+/// target-scoped install selection exists.
+async fn resolve_lock_for_environments(
+    input: &ProjectSyncInput,
+    environments: &[ResolverEnvironment],
+    freshness: &LockFreshness,
+) -> Result<LockFile, ProjectError> {
+    let request_template =
+        ResolutionRequestTemplate::new(build_resolution_roots(input), freshness.index_url.clone());
+    let resolver = Resolver::new();
+    let mut merged_packages = Vec::new();
+    let mut expected_shape: Option<Vec<LockPackage>> = None;
+
+    for environment in environments {
+        let target_packages = resolver
+            .resolve(request_template.for_environment(environment.clone()))
+            .await
+            .map_err(|source| ProjectError::ResolveDependenciesForTarget {
+                environment: environment_id(environment),
+                source,
+            })?
+            .into_iter()
+            .map(|package| map_resolved_package(package, &freshness.index_url))
+            .collect::<Vec<_>>();
+
+        let current_shape = package_shape(&target_packages);
+        if let Some(expected_shape) = &expected_shape {
+            if current_shape != *expected_shape {
+                return Err(ProjectError::MultiTargetLockMergeMismatch {
+                    environment: environment_id(environment),
+                    detail: describe_package_shape_mismatch(expected_shape, &current_shape),
+                });
+            }
+            merge_target_artifacts(&mut merged_packages, &target_packages);
+        } else {
+            expected_shape = Some(current_shape);
+            merged_packages = target_packages;
+        }
+    }
+
+    Ok(LockFile {
+        path: input.pylock_path.clone(),
+        requires_python: input.requires_python.clone(),
+        environments: environments.iter().map(lock_environment).collect(),
+        extras: input
+            .optional_dependencies
+            .iter()
+            .map(|extra| extra.name.normalized_name.clone())
+            .collect(),
+        dependency_groups: input
+            .dependency_groups
+            .iter()
+            .map(|group| group.name.normalized_name.clone())
+            .collect(),
+        default_groups: default_group_names(input),
+        packages: merged_packages,
+        tool_pyra: freshness.clone(),
+    })
+}
+
+fn build_resolution_roots(input: &ProjectSyncInput) -> Vec<ResolutionRoot> {
     let mut roots = Vec::new();
     roots.push(ResolutionRoot {
         token: ResolutionRootToken {
@@ -541,65 +616,7 @@ async fn resolve_lock(
                 .collect(),
         });
     }
-
-    let packages = Resolver::new()
-        .resolve(ResolutionRequest {
-            environment: env.clone(),
-            roots,
-            index_url: freshness.index_url.clone(),
-        })
-        .await
-        .map_err(|source| ProjectError::ResolveDependencies { source })?;
-
-    Ok(LockFile {
-        path: input.pylock_path.clone(),
-        requires_python: input.requires_python.clone(),
-        environments: vec![LockEnvironment {
-            id: environment_id(env),
-            marker: environment_marker(env),
-        }],
-        extras: input
-            .optional_dependencies
-            .iter()
-            .map(|extra| extra.name.normalized_name.clone())
-            .collect(),
-        dependency_groups: input
-            .dependency_groups
-            .iter()
-            .map(|group| group.name.normalized_name.clone())
-            .collect(),
-        default_groups: default_group_names(input),
-        packages: packages
-            .into_iter()
-            .map(|package| LockPackage {
-                name: package.name,
-                version: package.version,
-                marker: package_marker(&package.root_tokens),
-                requires_python: package.requires_python,
-                index: Some(freshness.index_url.clone()),
-                dependencies: package
-                    .dependencies
-                    .into_iter()
-                    .map(|dependency| LockDependencyRef {
-                        name: dependency.name,
-                        version: dependency.version,
-                    })
-                    .collect(),
-                sdist: package
-                    .artifacts
-                    .iter()
-                    .find(|artifact| matches!(artifact.kind, pyra_resolver::ArtifactKind::Sdist))
-                    .map(map_artifact),
-                wheels: package
-                    .artifacts
-                    .iter()
-                    .filter(|artifact| matches!(artifact.kind, pyra_resolver::ArtifactKind::Wheel))
-                    .map(map_artifact)
-                    .collect(),
-            })
-            .collect(),
-        tool_pyra: freshness.clone(),
-    })
+    roots
 }
 
 // Keep the initial environment id deterministic so later multi-target locks can
@@ -615,6 +632,15 @@ fn environment_marker(env: &ResolverEnvironment) -> String {
         env.markers.sys_platform(),
         env.markers.platform_machine()
     )
+}
+
+fn lock_environment(env: &ResolverEnvironment) -> LockEnvironment {
+    LockEnvironment {
+        id: environment_id(env),
+        marker: environment_marker(env),
+        interpreter_version: env.python_full_version.clone(),
+        target_triple: env.target_triple.clone(),
+    }
 }
 
 fn default_group_names(input: &ProjectSyncInput) -> Vec<String> {
@@ -638,6 +664,35 @@ fn package_marker(tokens: &[ResolutionRootToken]) -> Option<LockMarker> {
     LockMarker::from_clauses(clauses)
 }
 
+fn map_resolved_package(package: pyra_resolver::ResolvedPackage, index_url: &str) -> LockPackage {
+    LockPackage {
+        name: package.name,
+        version: package.version,
+        marker: package_marker(&package.root_tokens),
+        requires_python: package.requires_python,
+        index: Some(index_url.to_string()),
+        dependencies: package
+            .dependencies
+            .into_iter()
+            .map(|dependency| LockDependencyRef {
+                name: dependency.name,
+                version: dependency.version,
+            })
+            .collect(),
+        sdist: package
+            .artifacts
+            .iter()
+            .find(|artifact| matches!(artifact.kind, pyra_resolver::ArtifactKind::Sdist))
+            .map(map_artifact),
+        wheels: package
+            .artifacts
+            .iter()
+            .filter(|artifact| matches!(artifact.kind, pyra_resolver::ArtifactKind::Wheel))
+            .map(map_artifact)
+            .collect(),
+    }
+}
+
 fn map_artifact(artifact: &pyra_resolver::ArtifactRecord) -> LockArtifact {
     LockArtifact {
         name: artifact.name.clone(),
@@ -646,6 +701,57 @@ fn map_artifact(artifact: &pyra_resolver::ArtifactRecord) -> LockArtifact {
         upload_time: artifact.upload_time.clone(),
         sha256: artifact.sha256.clone(),
     }
+}
+
+fn package_shape(packages: &[LockPackage]) -> Vec<LockPackage> {
+    let mut shape = packages
+        .iter()
+        .map(|package| LockPackage {
+            name: package.name.clone(),
+            version: package.version.clone(),
+            marker: package.marker.clone(),
+            requires_python: package.requires_python.clone(),
+            index: package.index.clone(),
+            dependencies: package.dependencies.clone(),
+            sdist: None,
+            wheels: Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    shape.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then(left.version.cmp(&right.version))
+    });
+    shape
+}
+
+fn merge_target_artifacts(merged: &mut [LockPackage], target: &[LockPackage]) {
+    for (existing, incoming) in merged.iter_mut().zip(target.iter()) {
+        if existing.sdist.is_none() {
+            existing.sdist = incoming.sdist.clone();
+        }
+        existing.wheels.extend(incoming.wheels.iter().cloned());
+        existing
+            .wheels
+            .sort_by(|left, right| left.name.cmp(&right.name));
+        existing.wheels.dedup();
+    }
+}
+
+fn describe_package_shape_mismatch(expected: &[LockPackage], actual: &[LockPackage]) -> String {
+    let expected_names = expected
+        .iter()
+        .map(|package| format!("{}=={}", package.name, package.version))
+        .collect::<Vec<_>>();
+    let actual_names = actual
+        .iter()
+        .map(|package| format!("{}=={}", package.name, package.version))
+        .collect::<Vec<_>>();
+    format!(
+        "expected packages [{}] but resolved [{}]",
+        expected_names.join(", "),
+        actual_names.join(", ")
+    )
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -672,8 +778,12 @@ mod tests {
     use pyra_core::{AppContext, AppPaths, Verbosity};
     use pyra_errors::UserFacingError;
     use pyra_python::{ArchiveFormat, HostTarget, InstalledPythonRecord, PythonVersion};
+    use serde_json::json;
 
-    use super::{ProjectService, SyncLockMode, SyncProjectRequest};
+    use super::{
+        MULTI_TARGET_RESOLUTION_STRATEGY, ProjectService, SyncLockMode, SyncProjectRequest,
+        lock_freshness, resolve_lock_for_environments, resolver_environment_for_target,
+    };
     use crate::ProjectError;
 
     #[test]
@@ -802,6 +912,205 @@ python = "3.13.12"
         assert!(!root.join("pylock.toml").exists());
     }
 
+    #[tokio::test]
+    async fn resolves_host_plus_linux_fixture_into_one_lock() {
+        let temp_dir = tempfile::tempdir().expect("temporary directory");
+        let root = Utf8PathBuf::from_path_buf(temp_dir.path().join("workspace").join("sample"))
+            .expect("utf-8 project root");
+        fs::create_dir_all(&root).expect("project root");
+        let context = context_for_project(temp_dir.path(), &root);
+        write_pyproject(
+            &root.join("pyproject.toml"),
+            r#"[project]
+name = "sample"
+version = "0.1.0"
+dependencies = ["shared==1.0.0"]
+
+[tool.pyra]
+python = "3.13.12"
+"#,
+        );
+        let input = crate::sync::ProjectSyncInputLoader
+            .load(&context)
+            .expect("project input");
+        let index = target_fixture_index(
+            &[(
+                "shared",
+                &[
+                    "shared-1.0.0-cp313-abi3-macosx_11_0_arm64.whl",
+                    "shared-1.0.0-cp313-abi3-manylinux_2_17_x86_64.whl",
+                ],
+            )],
+            "Metadata-Version: 2.3\nName: shared\nVersion: 1.0.0\n",
+        )
+        .expect("fixture index");
+        let host = resolver_environment_for_target("3.13.12", "aarch64-apple-darwin")
+            .expect("host environment");
+        let linux = resolver_environment_for_target("3.13.12", "x86_64-unknown-linux-gnu")
+            .expect("linux environment");
+        let mut freshness = lock_freshness(&input, &host, &index.base_url);
+        freshness.resolution_strategy = MULTI_TARGET_RESOLUTION_STRATEGY.to_string();
+
+        let lock = resolve_lock_for_environments(&input, &[host, linux], &freshness)
+            .await
+            .expect("multi-target lock");
+
+        assert_eq!(lock.environments.len(), 2);
+        assert_eq!(
+            lock.environments
+                .iter()
+                .map(|environment| {
+                    (
+                        environment.id.as_str(),
+                        environment.interpreter_version.as_str(),
+                        environment.target_triple.as_str(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "cpython-3.13.12-aarch64-apple-darwin",
+                    "3.13.12",
+                    "aarch64-apple-darwin",
+                ),
+                (
+                    "cpython-3.13.12-x86_64-unknown-linux-gnu",
+                    "3.13.12",
+                    "x86_64-unknown-linux-gnu",
+                ),
+            ]
+        );
+        assert_eq!(
+            lock.packages[0]
+                .wheels
+                .iter()
+                .map(|wheel| wheel.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "shared-1.0.0-cp313-abi3-macosx_11_0_arm64.whl",
+                "shared-1.0.0-cp313-abi3-manylinux_2_17_x86_64.whl",
+            ]
+        );
+        assert_eq!(
+            lock.tool_pyra.resolution_strategy,
+            MULTI_TARGET_RESOLUTION_STRATEGY
+        );
+    }
+
+    #[tokio::test]
+    async fn resolves_host_plus_macos_fixture_into_one_lock() {
+        let temp_dir = tempfile::tempdir().expect("temporary directory");
+        let root = Utf8PathBuf::from_path_buf(temp_dir.path().join("workspace").join("sample"))
+            .expect("utf-8 project root");
+        fs::create_dir_all(&root).expect("project root");
+        let context = context_for_project(temp_dir.path(), &root);
+        write_pyproject(
+            &root.join("pyproject.toml"),
+            r#"[project]
+name = "sample"
+version = "0.1.0"
+dependencies = ["shared==1.0.0"]
+
+[tool.pyra]
+python = "3.13.12"
+"#,
+        );
+        let input = crate::sync::ProjectSyncInputLoader
+            .load(&context)
+            .expect("project input");
+        let index = target_fixture_index(
+            &[(
+                "shared",
+                &[
+                    "shared-1.0.0-cp313-abi3-manylinux_2_17_x86_64.whl",
+                    "shared-1.0.0-cp313-abi3-macosx_11_0_x86_64.whl",
+                ],
+            )],
+            "Metadata-Version: 2.3\nName: shared\nVersion: 1.0.0\n",
+        )
+        .expect("fixture index");
+        let host = resolver_environment_for_target("3.13.12", "x86_64-unknown-linux-gnu")
+            .expect("host environment");
+        let macos = resolver_environment_for_target("3.13.12", "x86_64-apple-darwin")
+            .expect("macOS environment");
+        let mut freshness = lock_freshness(&input, &host, &index.base_url);
+        freshness.resolution_strategy = MULTI_TARGET_RESOLUTION_STRATEGY.to_string();
+
+        let lock = resolve_lock_for_environments(&input, &[host, macos], &freshness)
+            .await
+            .expect("multi-target lock");
+
+        assert_eq!(lock.environments.len(), 2);
+        assert_eq!(
+            lock.packages[0]
+                .wheels
+                .iter()
+                .map(|wheel| wheel.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "shared-1.0.0-cp313-abi3-macosx_11_0_x86_64.whl",
+                "shared-1.0.0-cp313-abi3-manylinux_2_17_x86_64.whl",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn reports_the_failing_target_environment_for_multi_target_resolution() {
+        let temp_dir = tempfile::tempdir().expect("temporary directory");
+        let root = Utf8PathBuf::from_path_buf(temp_dir.path().join("workspace").join("sample"))
+            .expect("utf-8 project root");
+        fs::create_dir_all(&root).expect("project root");
+        let context = context_for_project(temp_dir.path(), &root);
+        write_pyproject(
+            &root.join("pyproject.toml"),
+            r#"[project]
+name = "sample"
+version = "0.1.0"
+dependencies = ["shared==1.0.0"]
+
+[tool.pyra]
+python = "3.13.12"
+"#,
+        );
+        let input = crate::sync::ProjectSyncInputLoader
+            .load(&context)
+            .expect("project input");
+        let index = target_fixture_index(
+            &[("shared", &["shared-1.0.0-cp313-abi3-macosx_11_0_arm64.whl"])],
+            "Metadata-Version: 2.3\nName: shared\nVersion: 1.0.0\n",
+        )
+        .expect("fixture index");
+        let host = resolver_environment_for_target("3.13.12", "aarch64-apple-darwin")
+            .expect("host environment");
+        let linux = resolver_environment_for_target("3.13.12", "x86_64-unknown-linux-gnu")
+            .expect("linux environment");
+        let mut freshness = lock_freshness(&input, &host, &index.base_url);
+        freshness.resolution_strategy = MULTI_TARGET_RESOLUTION_STRATEGY.to_string();
+
+        let error = resolve_lock_for_environments(&input, &[host, linux], &freshness)
+            .await
+            .expect_err("linux target should fail");
+
+        assert!(matches!(
+            error,
+            ProjectError::ResolveDependenciesForTarget {
+                ref environment,
+                ref source,
+            } if environment == "cpython-3.13.12-x86_64-unknown-linux-gnu"
+                && matches!(
+                    source,
+                    pyra_resolver::ResolverError::NoInstallableArtifacts { package }
+                    if package == "shared"
+                )
+        ));
+        assert!(
+            error
+                .report()
+                .summary
+                .contains("cpython-3.13.12-x86_64-unknown-linux-gnu")
+        );
+    }
+
     fn installer_state_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
@@ -905,5 +1214,52 @@ python = "3.13.12"
             install_dir: Utf8PathBuf::from(format!("/tmp/{version}")),
             executable_path: Utf8PathBuf::from(format!("/tmp/{version}/python/bin/python3")),
         }
+    }
+
+    struct TargetFixtureIndex {
+        _temp_dir: tempfile::TempDir,
+        base_url: String,
+    }
+
+    fn target_fixture_index(
+        packages: &[(&str, &[&str])],
+        metadata_contents: &str,
+    ) -> Result<TargetFixtureIndex, Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
+        let index_dir = temp_dir.path().join("simple");
+        let files_dir = temp_dir.path().join("files");
+        fs::create_dir_all(&index_dir)?;
+        fs::create_dir_all(&files_dir)?;
+
+        for (package, filenames) in packages {
+            let files = filenames
+                .iter()
+                .enumerate()
+                .map(|(index, filename)| {
+                    let artifact_path = files_dir.join(filename);
+                    fs::write(&artifact_path, format!("fixture artifact: {filename}\n"))?;
+                    fs::write(
+                        format!("{}.metadata", artifact_path.display()),
+                        metadata_contents,
+                    )?;
+                    Ok(json!({
+                        "filename": filename,
+                        "url": format!("file://{}", artifact_path.display()),
+                        "hashes": { "sha256": format!("{:064x}", index + 1) },
+                        "size": fs::metadata(&artifact_path)?.len(),
+                        "core-metadata": true,
+                    }))
+                })
+                .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
+            fs::write(
+                index_dir.join(format!("{package}.json")),
+                serde_json::to_vec_pretty(&json!({ "files": files }))?,
+            )?;
+        }
+
+        Ok(TargetFixtureIndex {
+            _temp_dir: temp_dir,
+            base_url: format!("file://{}", index_dir.display()),
+        })
     }
 }

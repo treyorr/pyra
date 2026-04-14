@@ -50,6 +50,8 @@ Current fields are:
 
 - `id`
 - `marker`
+- `interpreter-version`
+- `target-triple`
 
 Why this exists:
 
@@ -60,8 +62,9 @@ Why this exists:
 - It lets later multi-target work extend the environment metadata without
   redesigning the top-level lock shape again.
 
-Current writes still contain one environment slice, but the schema is now ready
-to round-trip more than one.
+Single-target locks still record one environment slice. Multi-target locks can
+now record one table per resolved target environment with its own interpreter
+version and target triple.
 
 ## `tool.pyra`
 
@@ -105,3 +108,18 @@ The current resolution strategy identifier means:
 
 This identifier is part of lock freshness so Pyra can change strategy later
 without silently trusting old lock assumptions.
+
+## `environment-scoped-matrix-v1`
+
+This strategy identifier means:
+
+- resolve one target environment at a time
+- merge the compatible shared package graph into one lock
+- record one `[[environments]]` table per resolved target
+
+Current multi-target generation is intentionally narrow:
+
+- per-target environment metadata is recorded explicitly
+- the merged lock is accepted only when package graph shape stays identical
+  across targets
+- target configuration and host-specific slice selection remain future work

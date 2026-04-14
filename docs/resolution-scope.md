@@ -97,3 +97,13 @@ project inputs -> resolve -> lock -> reconcile
 As the model expands, the lock freshness strategy and the documented resolution
 strategy identifier should change explicitly rather than silently broadening
 assumptions.
+
+## Multi-Target Execution
+
+Pyra now also has a multi-target lock-generation strategy,
+`environment-scoped-matrix-v1`.
+
+That strategy resolves one target environment at a time and merges the result
+only when the package graph shape stays identical across targets. This keeps
+multi-target execution additive to the existing pipeline instead of replacing
+it before target-scoped install selection exists.

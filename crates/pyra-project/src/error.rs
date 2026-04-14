@@ -167,6 +167,14 @@ pub enum ProjectError {
         #[source]
         source: ResolverError,
     },
+    #[error("dependency resolution failed for target environment `{environment}`")]
+    ResolveDependenciesForTarget {
+        environment: String,
+        #[source]
+        source: ResolverError,
+    },
+    #[error("multi-target lock merge failed for target environment `{environment}`")]
+    MultiTargetLockMergeMismatch { environment: String, detail: String },
     #[error("failed to query installed packages from {interpreter}")]
     InspectEnvironment { interpreter: String, detail: String },
     #[error("failed to create locked artifact directory at {path}")]
@@ -559,6 +567,33 @@ impl UserFacingError for ProjectError {
             )
             .with_suggestion("Adjust the declared dependency constraints and retry.")
             .with_verbose_detail(source.verbose_detail()),
+            Self::ResolveDependenciesForTarget {
+                environment,
+                source,
+            } => ErrorReport::new(
+                ErrorKind::User,
+                format!("Pyra could not resolve target environment `{environment}`."),
+            )
+            .with_detail(
+                source.conflict_summary().unwrap_or(
+                    "The selected dependencies could not be locked for one target in the requested multi-target matrix.",
+                ),
+            )
+            .with_suggestion("Adjust the declared dependency constraints or reduce the target set, then retry.")
+            .with_verbose_detail(format!(
+                "environment: {environment}\n{}",
+                source.verbose_detail()
+            )),
+            Self::MultiTargetLockMergeMismatch {
+                environment,
+                detail,
+            } => ErrorReport::new(
+                ErrorKind::User,
+                format!("Pyra could not merge target environment `{environment}` into one lock."),
+            )
+            .with_detail("The target resolved successfully, but its package graph diverged from the shared multi-target lock shape.")
+            .with_suggestion("Use a smaller target matrix for now or wait until target-scoped install selection lands.")
+            .with_verbose_detail(detail.clone()),
             Self::InspectEnvironment {
                 interpreter,
                 detail,
