@@ -1862,7 +1862,7 @@ if args[:3] == ["-m", "venv", "--clear"] and len(args) == 4:
     bin_dir.mkdir(parents=True, exist_ok=True)
     python_path = bin_dir / "python"
     python_path.write_text(
-        "#!/bin/sh\\nexec \\"{}\\"" \\"{}\\"" \\"$@\\"\\n".format(
+        "#!/bin/sh\nexec \"{}\" \"{}\" \"$@\"\n".format(
             sys.executable,
             pathlib.Path(__file__),
         ),

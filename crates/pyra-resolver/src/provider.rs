@@ -41,6 +41,21 @@ pub async fn resolve_request(
     client: &reqwest::Client,
     request: ResolutionRequest,
 ) -> Result<Vec<ResolvedPackage>, ResolverError> {
+    trace_line(format!(
+        "resolve_request: index={} target={} python={} roots={:?}",
+        request.index_url,
+        request.environment.target_triple,
+        request.environment.python_full_version,
+        request
+            .roots
+            .iter()
+            .map(|root| (
+                token_kind_name(&root.token.kind),
+                root.token.name.as_str(),
+                root.requirements.as_slice()
+            ))
+            .collect::<Vec<_>>()
+    ));
     let catalog = build_catalog(client, &request).await?;
     let provider = build_provider(&request, &catalog)?;
     let root_version = Version::from_str("0").expect("synthetic root version");
@@ -197,6 +212,7 @@ async fn build_catalog(
 ) -> Result<HashMap<String, Vec<SimpleCandidate>>, ResolverError> {
     let mut queue = VecDeque::new();
     let mut seen = HashSet::new();
+    let mut root_packages = BTreeSet::new();
     for root in &request.roots {
         for requirement in &root.requirements {
             let requirement = Requirement::<VerbatimUrl>::from_str(requirement).map_err(|_| {
@@ -205,7 +221,13 @@ async fn build_catalog(
                     value: requirement.clone(),
                 }
             })?;
-            queue.push_back(catalog_request(&requirement));
+            let request = catalog_request(&requirement);
+            trace_line(format!(
+                "catalog root requirement: raw={} package={} extras={:?}",
+                requirement, request.package, request.extras
+            ));
+            root_packages.insert(request.package.clone());
+            queue.push_back(request);
         }
     }
 
@@ -216,14 +238,36 @@ async fn build_catalog(
         }
 
         if !catalog.contains_key(&next.package) {
-            let candidates = fetch_candidates(
+            trace_line(format!(
+                "fetch package catalog: package={} extras={:?}",
+                next.package, next.extras
+            ));
+            match fetch_candidates(
                 client,
                 &request.index_url,
                 &next.package,
                 &request.environment,
             )
-            .await?;
-            catalog.insert(next.package.clone(), candidates);
+            .await
+            {
+                Ok(candidates) => {
+                    catalog.insert(next.package.clone(), candidates);
+                }
+                Err(error) if root_packages.contains(&next.package) => {
+                    return Err(error);
+                }
+                Err(error) => {
+                    // Build the offline provider from the full reachable catalog, but do not
+                    // let an unreachable transitive branch abort the whole solve. Recording an
+                    // empty version set preserves the root -> lock contract while allowing
+                    // PubGrub to reject only the candidate branches that require this package.
+                    trace_line(format!(
+                        "treat transitive package as unavailable: package={} error={}",
+                        next.package, error
+                    ));
+                    catalog.insert(next.package.clone(), Vec::new());
+                }
+            }
         }
 
         let candidates = catalog
@@ -237,6 +281,12 @@ async fn build_catalog(
         }
     }
     Ok(catalog)
+}
+
+fn trace_line(message: String) {
+    if std::env::var_os("PYRA_RESOLVER_TRACE").is_some() {
+        eprintln!("resolver-trace: {message}");
+    }
 }
 
 fn build_provider(
@@ -803,6 +853,36 @@ mod tests {
             error,
             ResolverError::NoInstallableArtifacts { package } if package == "alpha"
         ));
+    }
+
+    #[tokio::test]
+    async fn missing_transitive_package_does_not_abort_other_viable_candidates() {
+        let harness = ResolverFixtureHarness::new().expect("fixture harness");
+        harness
+            .add_package(
+                PackageFixture::new("alpha")
+                    .with_artifact(ArtifactFixture::wheel("1.0.0"))
+                    .with_artifact(ArtifactFixture::wheel("2.0.0").with_dependency("ghost>=1")),
+            )
+            .expect("alpha fixture");
+
+        let resolved = harness.resolve(&["alpha"]).await.expect("resolution");
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].name, "alpha");
+        assert_eq!(resolved[0].version, "1.0.0");
+    }
+
+    #[tokio::test]
+    async fn missing_root_package_still_fails_immediately() {
+        let harness = ResolverFixtureHarness::new().expect("fixture harness");
+
+        let error = harness
+            .resolve(&["ghost"])
+            .await
+            .expect_err("missing root package");
+
+        assert!(matches!(error, ResolverError::ReadIndexFile { .. }));
     }
 
     #[tokio::test]

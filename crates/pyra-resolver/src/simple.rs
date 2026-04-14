@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::str::FromStr;
 
+use regex::Regex;
 use serde::Deserialize;
 
 use crate::{
@@ -45,14 +46,38 @@ pub struct SimpleFile {
     pub yanked: Option<serde_json::Value>,
 }
 
+impl SimpleFile {
+    fn is_yanked(&self) -> bool {
+        self.yanked.as_ref().is_some_and(|value| match value {
+            serde_json::Value::Bool(flag) => *flag,
+            serde_json::Value::Null => false,
+            _ => true,
+        })
+    }
+
+    fn exposes_core_metadata(&self) -> bool {
+        self.core_metadata
+            .as_ref()
+            .is_some_and(|value| match value {
+                serde_json::Value::Bool(flag) => *flag,
+                serde_json::Value::Null => false,
+                _ => true,
+            })
+    }
+}
+
 pub async fn fetch_candidates(
     client: &reqwest::Client,
     index_url: &str,
     package: &str,
     env: &ResolverEnvironment,
 ) -> Result<Vec<SimpleCandidate>, ResolverError> {
-    let normalized = package.to_string();
-    let project_url = format!("{}/{}.json", index_url.trim_end_matches('/'), normalized);
+    let normalized = normalize_package_name(package);
+    let project_url = project_index_url(index_url, &normalized);
+    trace_line(format!(
+        "fetch_candidates: package={} normalized={} url={}",
+        package, normalized, project_url
+    ));
     let body = read_index_text(client, &project_url).await?;
     let project = serde_json::from_str::<SimpleProjectResponse>(&body).map_err(|source| {
         ResolverError::ParseIndex {
@@ -63,7 +88,15 @@ pub async fn fetch_candidates(
 
     let mut grouped = BTreeMap::new();
     for file in project.files {
-        if file.yanked.is_some() || !artifact_compatible(&file, env) {
+        if file.is_yanked() {
+            trace_line(format!("skip yanked file: {}", file.filename));
+            continue;
+        }
+        if !artifact_compatible(&file, env) {
+            trace_line(format!(
+                "skip incompatible artifact: {} for target={}",
+                file.filename, env.target_triple
+            ));
             continue;
         }
         if let Some(requires_python) = &file.requires_python {
@@ -75,10 +108,15 @@ pub async fn fetch_candidates(
                     }
                 })?;
             if !specifiers.contains(&env.python_version) {
+                trace_line(format!(
+                    "skip requires-python mismatch: {} requires {} but env is {}",
+                    file.filename, requires_python, env.python_full_version
+                ));
                 continue;
             }
         }
         let Some(version) = version_from_filename(package, &file.filename)? else {
+            trace_line(format!("skip unparsed version filename: {}", file.filename));
             continue;
         };
         grouped.entry(version).or_insert_with(Vec::new).push(file);
@@ -90,18 +128,30 @@ pub async fn fetch_candidates(
         let chosen = choose_best_artifacts(files);
         let Some(metadata_url) = chosen
             .iter()
-            .find(|file| file.core_metadata.is_some())
+            .find(|file| file.exposes_core_metadata())
             .map(|file| format!("{}.metadata", file.url))
         else {
             // Keep missing metadata distinct from "no installable artifacts" so
             // resolver tests can verify incomplete index data explicitly.
             missing_core_metadata = true;
+            trace_line(format!(
+                "no core metadata among chosen artifacts for {}=={}",
+                package, version
+            ));
             continue;
         };
 
+        trace_line(format!(
+            "fetch metadata: {}=={} from {}",
+            package, version, metadata_url
+        ));
         let metadata = fetch_metadata(client, package, &metadata_url).await?;
         if let Some(requires_python) = &metadata.requires_python {
             if !requires_python.contains(&env.python_version) {
+                trace_line(format!(
+                    "skip metadata requires-python mismatch: {}=={} requires {} but env is {}",
+                    package, version, requires_python, env.python_full_version
+                ));
                 continue;
             }
         }
@@ -125,9 +175,20 @@ pub async fn fetch_candidates(
             });
         }
         if artifacts.is_empty() {
+            trace_line(format!(
+                "skip {}=={} because no chosen artifacts had sha256 hashes",
+                package, version
+            ));
             continue;
         }
 
+        trace_line(format!(
+            "candidate accepted: {}=={} artifacts={} deps={}",
+            package,
+            version,
+            artifacts.len(),
+            metadata.dependencies.len()
+        ));
         candidates.push(SimpleCandidate {
             version,
             requires_python: metadata.requires_python,
@@ -148,6 +209,23 @@ pub async fn fetch_candidates(
     }
 
     Ok(candidates)
+}
+
+fn project_index_url(index_url: &str, normalized_package: &str) -> String {
+    let trimmed = index_url.trim_end_matches('/');
+    if file_url_to_path(index_url).is_some() {
+        format!("{trimmed}/{normalized_package}.json")
+    } else {
+        format!("{trimmed}/{normalized_package}/")
+    }
+}
+
+fn normalize_package_name(package: &str) -> String {
+    static NORMALIZE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    NORMALIZE
+        .get_or_init(|| Regex::new(r"[-_.]+").expect("valid package normalization regex"))
+        .replace_all(&package.to_ascii_lowercase(), "-")
+        .into_owned()
 }
 
 async fn fetch_metadata(
@@ -184,8 +262,14 @@ async fn read_index_text(client: &reqwest::Client, url: &str) -> Result<String, 
     }
     let response = client
         .get(url)
+        .header("Accept", "application/vnd.pypi.simple.v1+json")
         .send()
         .await
+        .map_err(|source| ResolverError::RequestIndex {
+            url: url.to_string(),
+            source,
+        })?
+        .error_for_status()
         .map_err(|source| ResolverError::RequestIndex {
             url: url.to_string(),
             source,
@@ -207,15 +291,19 @@ async fn read_metadata_text(client: &reqwest::Client, url: &str) -> Result<Strin
         });
     }
 
-    let response =
-        client
-            .get(url)
-            .send()
-            .await
-            .map_err(|source| ResolverError::RequestMetadata {
-                url: url.to_string(),
-                source,
-            })?;
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|source| ResolverError::RequestMetadata {
+            url: url.to_string(),
+            source,
+        })?
+        .error_for_status()
+        .map_err(|source| ResolverError::RequestMetadata {
+            url: url.to_string(),
+            source,
+        })?;
     response
         .text()
         .await
@@ -231,4 +319,70 @@ fn file_url_to_path(url: &str) -> Option<std::path::PathBuf> {
         return None;
     }
     parsed.to_file_path().ok()
+}
+
+fn trace_line(message: String) {
+    if std::env::var_os("PYRA_RESOLVER_TRACE").is_some() {
+        eprintln!("resolver-trace: {message}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SimpleFile, normalize_package_name, project_index_url};
+    use serde_json::json;
+
+    #[test]
+    fn normalizes_names_for_simple_api_lookups() {
+        assert_eq!(normalize_package_name("Requests_SOCKS"), "requests-socks");
+        assert_eq!(normalize_package_name("zope.interface"), "zope-interface");
+    }
+
+    #[test]
+    fn remote_urls_use_pep_691_project_paths() {
+        assert_eq!(
+            project_index_url("https://pypi.org/simple", "click"),
+            "https://pypi.org/simple/click/"
+        );
+    }
+
+    #[test]
+    fn file_urls_keep_fixture_json_shape() {
+        assert_eq!(
+            project_index_url("file:///tmp/simple", "click"),
+            "file:///tmp/simple/click.json"
+        );
+    }
+
+    #[test]
+    fn false_yanked_flag_does_not_exclude_real_pypi_files() {
+        let file = SimpleFile {
+            filename: "click-8.3.1-py3-none-any.whl".to_string(),
+            url: "https://files.pythonhosted.org/example.whl".to_string(),
+            hashes: Default::default(),
+            requires_python: Some(">=3.10".to_string()),
+            size: Some(1),
+            upload_time: None,
+            core_metadata: Some(json!({"sha256": "abc"})),
+            yanked: Some(json!(false)),
+        };
+
+        assert!(!file.is_yanked());
+    }
+
+    #[test]
+    fn false_core_metadata_flag_does_not_claim_metadata_endpoint() {
+        let file = SimpleFile {
+            filename: "click-8.3.1.tar.gz".to_string(),
+            url: "https://files.pythonhosted.org/example.tar.gz".to_string(),
+            hashes: Default::default(),
+            requires_python: Some(">=3.10".to_string()),
+            size: Some(1),
+            upload_time: None,
+            core_metadata: Some(json!(false)),
+            yanked: Some(json!(false)),
+        };
+
+        assert!(!file.exposes_core_metadata());
+    }
 }

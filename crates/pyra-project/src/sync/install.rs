@@ -706,6 +706,25 @@ mod test_support {
         if !hook.enabled.load(Ordering::SeqCst) {
             return Ok(());
         }
+
+        let delay_ms = hook.delay_ms.load(Ordering::SeqCst);
+        let (should_track, should_delay, should_fail) = {
+            let delayed_urls = hook.delayed_urls.lock().expect("download hook urls");
+            let failed_urls = hook.failed_urls.lock().expect("download hook urls");
+            // When the hook declares explicit URL sets, ignore unrelated downloads
+            // from other tests that might run in parallel.
+            let unscoped = delayed_urls.is_empty() && failed_urls.is_empty();
+            let listed = delayed_urls.contains(url) || failed_urls.contains(url);
+            let should_track = unscoped || listed;
+            let should_delay =
+                should_track && delay_ms > 0 && (unscoped || delayed_urls.contains(url));
+            let should_fail = should_track && failed_urls.contains(url);
+            (should_track, should_delay, should_fail)
+        };
+        if !should_track {
+            return Ok(());
+        }
+
         hook.started_urls
             .lock()
             .expect("download hook urls")
@@ -714,16 +733,6 @@ mod test_support {
         let current = hook.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
         let _in_flight = InFlightGuard { hook };
         update_max_in_flight(hook, current);
-
-        let delay_ms = hook.delay_ms.load(Ordering::SeqCst);
-        let (should_delay, should_fail) = {
-            let delayed_urls = hook.delayed_urls.lock().expect("download hook urls");
-            let failed_urls = hook.failed_urls.lock().expect("download hook urls");
-            (
-                delay_ms > 0 && (delayed_urls.is_empty() || delayed_urls.contains(url)),
-                failed_urls.contains(url),
-            )
-        };
 
         if should_fail {
             return Err(ProjectError::ReadLockedArtifact {
@@ -853,18 +862,28 @@ mod tests {
 
     #[test]
     fn builds_exact_reconciliation_plan() {
-        let packages = vec![
-            package(
-                "attrs",
-                "25.1.0",
-                LockMarker::from_clauses(vec![LockMarkerClause::dependency_group("pyra-default")]),
+        let mut attrs = package_with_named_artifact(
+            "attrs",
+            "25.1.0",
+            artifact_from_name(
+                "attrs-25.1.0-py3-none-any.whl",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             ),
-            package(
-                "pytest",
-                "8.3.0",
-                LockMarker::from_clauses(vec![LockMarkerClause::dependency_group("dev")]),
+        );
+        attrs.marker =
+            LockMarker::from_clauses(vec![LockMarkerClause::dependency_group("pyra-default")]);
+
+        let mut pytest = package_with_named_artifact(
+            "pytest",
+            "8.3.0",
+            artifact_from_name(
+                "pytest-8.3.0-py3-none-any.whl",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             ),
-        ];
+        );
+        pytest.marker = LockMarker::from_clauses(vec![LockMarkerClause::dependency_group("dev")]);
+
+        let packages = vec![attrs, pytest];
         let selected = ReconciliationPlan::for_selection(
             &packages,
             &LockSelection {
@@ -894,31 +913,52 @@ mod tests {
 
     #[test]
     fn selects_mixed_group_and_extra_markers() {
-        let packages = vec![
-            package(
-                "attrs",
-                "25.1.0",
-                LockMarker::from_clauses(vec![LockMarkerClause::dependency_group("pyra-default")]),
+        let mut attrs = package_with_named_artifact(
+            "attrs",
+            "25.1.0",
+            artifact_from_name(
+                "attrs-25.1.0-py3-none-any.whl",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             ),
-            package(
-                "pytest",
-                "8.3.0",
-                LockMarker::from_clauses(vec![
-                    LockMarkerClause::dependency_group("dev"),
-                    LockMarkerClause::extra("feature"),
-                ]),
+        );
+        attrs.marker =
+            LockMarker::from_clauses(vec![LockMarkerClause::dependency_group("pyra-default")]);
+
+        let mut pytest = package_with_named_artifact(
+            "pytest",
+            "8.3.0",
+            artifact_from_name(
+                "pytest-8.3.0-py3-none-any.whl",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             ),
-            package(
-                "sphinx",
-                "7.4.0",
-                LockMarker::from_clauses(vec![LockMarkerClause::dependency_group("docs")]),
+        );
+        pytest.marker = LockMarker::from_clauses(vec![
+            LockMarkerClause::dependency_group("dev"),
+            LockMarkerClause::extra("feature"),
+        ]);
+
+        let mut sphinx = package_with_named_artifact(
+            "sphinx",
+            "7.4.0",
+            artifact_from_name(
+                "sphinx-7.4.0-py3-none-any.whl",
+                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
             ),
-            package(
-                "rich-extra",
-                "1.0.0",
-                LockMarker::from_clauses(vec![LockMarkerClause::extra("feature")]),
+        );
+        sphinx.marker =
+            LockMarker::from_clauses(vec![LockMarkerClause::dependency_group("docs")]);
+
+        let mut rich_extra = package_with_named_artifact(
+            "rich-extra",
+            "1.0.0",
+            artifact_from_name(
+                "rich_extra-1.0.0-py3-none-any.whl",
+                "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
             ),
-        ];
+        );
+        rich_extra.marker = LockMarker::from_clauses(vec![LockMarkerClause::extra("feature")]);
+
+        let packages = vec![attrs, pytest, sphinx, rich_extra];
 
         let selected = ReconciliationPlan::for_selection(
             &packages,
