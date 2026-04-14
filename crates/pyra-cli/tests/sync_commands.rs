@@ -249,6 +249,124 @@ python = "3.13.12"
 
 #[cfg(unix)]
 #[test]
+fn sync_target_override_regenerates_lock_when_target_set_changes() {
+    let home = temp_env_root();
+    let index = start_fixture_index();
+    let project_root = home
+        .path()
+        .join("workspace")
+        .join("sample-sync-target-override-refresh");
+    fs::create_dir_all(&project_root).expect("project root");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        r#"[project]
+name = "sample-sync-target-override-refresh"
+version = "0.1.0"
+requires-python = "==3.13.*"
+dependencies = ["attrs==25.1.0"]
+
+[tool.pyra]
+python = "3.13.12"
+"#,
+    )
+    .expect("pyproject");
+
+    seed_managed_install(&home, "3.13.12").expect("managed install");
+    let state_path = home.path().join("installer-state.json");
+    let (host_target, foreign_target) = host_and_foreign_targets().expect("supported host target");
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .env("PYRA_INDEX_URL", &index.base_url)
+        .args(["sync", "--target", &host_target])
+        .assert()
+        .success()
+        .stdout(contains("Synced"));
+
+    let initial_lock = fs::read_to_string(project_root.join("pylock.toml")).expect("pylock");
+    assert!(initial_lock.contains(&format!("target-triple = \"{host_target}\"")));
+    assert!(!initial_lock.contains(&format!("target-triple = \"{foreign_target}\"")));
+    assert!(initial_lock.contains("resolution-strategy = \"environment-scoped-union-v1\""));
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .env("PYRA_INDEX_URL", &index.base_url)
+        .args([
+            "sync",
+            "--target",
+            &host_target,
+            "--target",
+            &foreign_target,
+        ])
+        .assert()
+        .success()
+        .stdout(contains("Updated `pylock.toml`"));
+
+    let refreshed_lock = fs::read_to_string(project_root.join("pylock.toml")).expect("pylock");
+    assert!(refreshed_lock.contains(&format!(
+        "id = \"{}\"",
+        lock_environment_id("3.13.12", &host_target)
+    )));
+    assert!(refreshed_lock.contains(&format!(
+        "id = \"{}\"",
+        lock_environment_id("3.13.12", &foreign_target)
+    )));
+    assert!(refreshed_lock.contains("resolution-strategy = \"environment-scoped-matrix-v1\""));
+}
+
+#[cfg(unix)]
+#[test]
+fn sync_target_override_beats_project_targets_for_one_invocation() {
+    let home = temp_env_root();
+    let index = start_fixture_index();
+    let project_root = home
+        .path()
+        .join("workspace")
+        .join("sample-sync-target-override-project-config");
+    fs::create_dir_all(&project_root).expect("project root");
+    let (host_target, foreign_target) = host_and_foreign_targets().expect("supported host target");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        format!(
+            r#"[project]
+name = "sample-sync-target-override-project-config"
+version = "0.1.0"
+requires-python = "==3.13.*"
+dependencies = ["attrs==25.1.0"]
+
+[tool.pyra]
+python = "3.13.12"
+targets = ["{host_target}", "{foreign_target}"]
+"#,
+        ),
+    )
+    .expect("pyproject");
+
+    seed_managed_install(&home, "3.13.12").expect("managed install");
+    let state_path = home.path().join("installer-state.json");
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .env("PYRA_INDEX_URL", &index.base_url)
+        .args(["sync", "--target", &host_target])
+        .assert()
+        .success()
+        .stdout(contains("Synced"));
+
+    let lock = fs::read_to_string(project_root.join("pylock.toml")).expect("pylock");
+    assert!(lock.contains(&format!(
+        "id = \"{}\"",
+        lock_environment_id("3.13.12", &host_target)
+    )));
+    assert!(!lock.contains(&format!(
+        "id = \"{}\"",
+        lock_environment_id("3.13.12", &foreign_target)
+    )));
+    assert!(lock.contains("resolution-strategy = \"environment-scoped-union-v1\""));
+}
+
+#[cfg(unix)]
+#[test]
 fn sync_frozen_uses_only_the_current_host_slice_from_a_multi_target_lock() {
     let home = temp_env_root();
     let project_root = home

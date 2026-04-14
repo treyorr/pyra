@@ -8,7 +8,7 @@ use std::fs;
 use camino::Utf8PathBuf;
 use toml_edit::{DocumentMut, Item, Table, Value};
 
-use crate::ProjectError;
+use crate::{ProjectError, pyproject::LockTargetSet};
 
 use super::LockMarker;
 
@@ -237,8 +237,26 @@ impl LockFile {
     /// Lock reuse is valid only when the full freshness model matches exactly.
     /// Keeping this comparison typed prevents the service layer from drifting
     /// into incomplete ad hoc checks.
-    pub fn is_fresh(&self, freshness: &LockFreshness) -> bool {
-        self.tool_pyra == *freshness
+    pub fn is_fresh_for(&self, freshness: &LockFreshness, targets: &LockTargetSet) -> bool {
+        self.tool_pyra == *freshness && self.resolved_target_set() == targets.as_slice()
+    }
+
+    fn resolved_target_set(&self) -> Vec<String> {
+        let raw_targets = if self.environments.is_empty() {
+            vec![self.tool_pyra.target_triple.clone()]
+        } else {
+            self.environments
+                .iter()
+                .map(|environment| environment.target_triple.clone())
+                .collect()
+        };
+        let mut targets = raw_targets
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        targets.sort();
+        targets
     }
 }
 
@@ -509,6 +527,7 @@ mod tests {
         CURRENT_RESOLUTION_STRATEGY, LockArtifact, LockDependencyRef, LockEnvironment, LockFile,
         LockFreshness, LockMarker, LockPackage, MULTI_TARGET_RESOLUTION_STRATEGY,
     };
+    use crate::pyproject::LockTargetSet;
     use crate::sync::LockMarkerClause;
 
     #[test]
@@ -526,7 +545,7 @@ mod tests {
             reread.tool_pyra.resolution_strategy,
             CURRENT_RESOLUTION_STRATEGY
         );
-        assert!(reread.is_fresh(&freshness));
+        assert!(reread.is_fresh_for(&freshness, &LockTargetSet::single("aarch64-apple-darwin")));
     }
 
     #[test]
@@ -717,7 +736,10 @@ resolution-strategy = "environment-scoped-union-v1"
         let mut freshness = sample_freshness();
         freshness.dependency_fingerprint = "different".to_string();
 
-        assert!(!sample_lock(Utf8PathBuf::from("/tmp/pylock.toml")).is_fresh(&freshness));
+        assert!(
+            !sample_lock(Utf8PathBuf::from("/tmp/pylock.toml"))
+                .is_fresh_for(&freshness, &LockTargetSet::single("aarch64-apple-darwin"))
+        );
     }
 
     #[test]
@@ -725,7 +747,10 @@ resolution-strategy = "environment-scoped-union-v1"
         let mut freshness = sample_freshness();
         freshness.interpreter_version = "3.13.13".to_string();
 
-        assert!(!sample_lock(Utf8PathBuf::from("/tmp/pylock.toml")).is_fresh(&freshness));
+        assert!(
+            !sample_lock(Utf8PathBuf::from("/tmp/pylock.toml"))
+                .is_fresh_for(&freshness, &LockTargetSet::single("aarch64-apple-darwin"))
+        );
     }
 
     #[test]
@@ -733,7 +758,10 @@ resolution-strategy = "environment-scoped-union-v1"
         let mut freshness = sample_freshness();
         freshness.target_triple = "x86_64-apple-darwin".to_string();
 
-        assert!(!sample_lock(Utf8PathBuf::from("/tmp/pylock.toml")).is_fresh(&freshness));
+        assert!(
+            !sample_lock(Utf8PathBuf::from("/tmp/pylock.toml"))
+                .is_fresh_for(&freshness, &LockTargetSet::single("aarch64-apple-darwin"))
+        );
     }
 
     #[test]
@@ -741,7 +769,10 @@ resolution-strategy = "environment-scoped-union-v1"
         let mut freshness = sample_freshness();
         freshness.index_url = "https://mirror.example/simple".to_string();
 
-        assert!(!sample_lock(Utf8PathBuf::from("/tmp/pylock.toml")).is_fresh(&freshness));
+        assert!(
+            !sample_lock(Utf8PathBuf::from("/tmp/pylock.toml"))
+                .is_fresh_for(&freshness, &LockTargetSet::single("aarch64-apple-darwin"))
+        );
     }
 
     #[test]
@@ -749,7 +780,44 @@ resolution-strategy = "environment-scoped-union-v1"
         let mut freshness = sample_freshness();
         freshness.resolution_strategy = "future-strategy-v2".to_string();
 
-        assert!(!sample_lock(Utf8PathBuf::from("/tmp/pylock.toml")).is_fresh(&freshness));
+        assert!(
+            !sample_lock(Utf8PathBuf::from("/tmp/pylock.toml"))
+                .is_fresh_for(&freshness, &LockTargetSet::single("aarch64-apple-darwin"))
+        );
+    }
+
+    #[test]
+    fn freshness_rejects_target_set_changes() {
+        let freshness = sample_freshness();
+        let expected_targets = LockTargetSet::from_override(&[
+            "aarch64-apple-darwin".to_string(),
+            "x86_64-unknown-linux-gnu".to_string(),
+        ])
+        .expect("target set");
+
+        assert!(
+            !sample_lock(Utf8PathBuf::from("/tmp/pylock.toml"))
+                .is_fresh_for(&freshness, &expected_targets)
+        );
+    }
+
+    #[test]
+    fn freshness_treats_target_set_order_as_non_semantic() {
+        let freshness = sample_freshness();
+        let mut lock = sample_lock(Utf8PathBuf::from("/tmp/pylock.toml"));
+        lock.environments.push(LockEnvironment {
+            id: "cpython-3.13.12-x86_64-unknown-linux-gnu".to_string(),
+            marker: "sys_platform == 'linux' and platform_machine == 'x86_64'".to_string(),
+            interpreter_version: "3.13.12".to_string(),
+            target_triple: "x86_64-unknown-linux-gnu".to_string(),
+        });
+        let expected_targets = LockTargetSet::from_override(&[
+            "x86_64-unknown-linux-gnu".to_string(),
+            "aarch64-apple-darwin".to_string(),
+        ])
+        .expect("target set");
+
+        assert!(lock.is_fresh_for(&freshness, &expected_targets));
     }
 
     fn sample_lock(path: Utf8PathBuf) -> LockFile {

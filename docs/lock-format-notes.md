@@ -123,4 +123,4 @@ Current multi-target generation is intentionally narrow:
 - the merged lock is accepted only when package graph shape stays identical
   across targets
 - current-host install selection narrows the lock to host-compatible artifacts
-- target configuration remains future work
+- the chosen target set still comes from project config or one sync invocation

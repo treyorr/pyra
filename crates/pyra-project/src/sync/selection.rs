@@ -212,6 +212,7 @@ mod tests {
             pylock_path: Utf8PathBuf::from("/tmp/example/pylock.toml"),
             project_name: "example".to_string(),
             pinned_python: PythonVersionRequest::parse("3.13").unwrap(),
+            declared_lock_targets: None,
             requires_python: Some("==3.13.*".to_string()),
             build_system_present: false,
             dependencies: vec![ProjectSyncRequirement {

@@ -8,13 +8,13 @@ works if current guarantees are precise.
 
 ## Current Resolution Target
 
-This slice resolves for:
+The base resolver still resolves one environment at a time:
 
 - one selected Pyra-managed interpreter
-- one current platform
-- one current target triple
+- one target triple
 
-Pyra does not currently produce one universal multi-platform lock.
+Pyra does not currently produce one universal multi-platform lock. Its shared
+multi-target lock work is intentionally narrower than that.
 
 ## Current Resolution Strategy
 
@@ -103,7 +103,7 @@ assumptions.
 Pyra now also has a multi-target lock-generation strategy,
 `environment-scoped-matrix-v1`.
 
-That strategy resolves one target environment at a time and merges the result
-only when the package graph shape stays identical across targets. This keeps
-multi-target execution additive to the existing pipeline instead of replacing
-it before target-scoped install selection exists.
+That strategy resolves a declared target matrix one environment at a time and
+merges the result only when the package graph shape stays identical across
+targets. This keeps multi-target execution additive to the existing pipeline
+instead of replacing it before target-scoped install selection exists.

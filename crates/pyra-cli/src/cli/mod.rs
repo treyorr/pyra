@@ -113,6 +113,9 @@ pub struct SyncArgs {
     /// Require an existing lock file and use it without rewriting.
     #[arg(long, conflicts_with = "locked")]
     pub frozen: bool,
+    /// Add one lock-generation target triple for this sync invocation only.
+    #[arg(long = "target")]
+    pub targets: Vec<String>,
     /// Include a dependency group in addition to the defaults.
     #[arg(long = "group")]
     pub groups: Vec<String>,

@@ -24,14 +24,15 @@ use crate::{
     identity::{ProjectIdentity, find_project_root},
     init::{InitProjectOutcome, create_initial_layout, validate_initial_layout},
     pyproject::{
-        DependencyDeclarationScope, add_dependency_requirement, read_python_selector,
-        remove_dependency_requirement, update_python_selector, validate_project_requires_python,
+        DependencyDeclarationScope, LockTargetSet, add_dependency_requirement,
+        read_python_selector, remove_dependency_requirement, update_python_selector,
+        validate_project_requires_python,
     },
     sync::{
         CURRENT_RESOLUTION_STRATEGY, EnvironmentInstaller, LockArtifact, LockDependencyRef,
         LockEnvironment, LockFile, LockFreshness, LockMarker, LockMarkerClause, LockPackage,
-        LockSelection, ProjectSyncInput, ProjectSyncInputLoader, ReconciliationPlan,
-        SyncSelectionRequest, SyncSelectionResolver,
+        LockSelection, MULTI_TARGET_RESOLUTION_STRATEGY, ProjectSyncInput, ProjectSyncInputLoader,
+        ReconciliationPlan, SyncSelectionRequest, SyncSelectionResolver,
     },
 };
 
@@ -97,6 +98,7 @@ pub struct RunProjectOutcome {
 pub struct SyncProjectRequest {
     pub selection: SyncSelectionRequest,
     pub lock_mode: SyncLockMode,
+    pub lock_targets: Vec<String>,
 }
 
 /// `pyra sync` supports one normal mode plus two CI-oriented lock-discipline
@@ -286,22 +288,31 @@ impl ProjectService {
             },
         )?;
         let resolver_environment = resolver_environment(&installation)?;
+        let lock_targets =
+            effective_lock_targets(&input, &installation.target_triple, &request.lock_targets)?;
+        let resolver_environments =
+            resolver_environments_for_targets(&installation.version.to_string(), &lock_targets)?;
         let index_url = std::env::var("PYRA_INDEX_URL")
             .unwrap_or_else(|_| "https://pypi.org/simple".to_string());
-        let freshness = lock_freshness(&input, &resolver_environment, &index_url);
+        let freshness = lock_freshness(
+            &input,
+            &resolver_environment,
+            &index_url,
+            resolution_strategy(&lock_targets),
+        );
         let (lock, lock_refreshed) = match request.lock_mode {
             SyncLockMode::WriteIfNeeded => {
                 if input.pylock_path.exists() {
                     let lock = LockFile::read(&input.pylock_path)?;
-                    if lock.is_fresh(&freshness) {
+                    if lock.is_fresh_for(&freshness, &lock_targets) {
                         (lock, false)
                     } else {
-                        let lock = resolve_lock(&input, &resolver_environment, &freshness).await?;
+                        let lock = resolve_lock(&input, &resolver_environments, &freshness).await?;
                         lock.write()?;
                         (lock, true)
                     }
                 } else {
-                    let lock = resolve_lock(&input, &resolver_environment, &freshness).await?;
+                    let lock = resolve_lock(&input, &resolver_environments, &freshness).await?;
                     lock.write()?;
                     (lock, true)
                 }
@@ -314,7 +325,7 @@ impl ProjectService {
                 }
 
                 let lock = LockFile::read(&input.pylock_path)?;
-                if !lock.is_fresh(&freshness) {
+                if !lock.is_fresh_for(&freshness, &lock_targets) {
                     return Err(ProjectError::StaleLockfileForLockedSync {
                         path: input.pylock_path.to_string(),
                     });
@@ -414,6 +425,17 @@ fn resolver_environment(
     )
 }
 
+fn resolver_environments_for_targets(
+    python_full_version: &str,
+    targets: &LockTargetSet,
+) -> Result<Vec<ResolverEnvironment>, ProjectError> {
+    targets
+        .as_slice()
+        .iter()
+        .map(|target| resolver_environment_for_target(python_full_version, target))
+        .collect()
+}
+
 fn resolver_environment_for_target(
     python_full_version: &str,
     target_triple: &str,
@@ -467,6 +489,38 @@ fn marker_platform_fields(
     }
 }
 
+fn effective_lock_targets(
+    input: &ProjectSyncInput,
+    host_target: &str,
+    override_targets: &[String],
+) -> Result<LockTargetSet, ProjectError> {
+    let targets = if override_targets.is_empty() {
+        input
+            .declared_lock_targets
+            .clone()
+            .unwrap_or_else(|| LockTargetSet::single(host_target.to_string()))
+    } else {
+        LockTargetSet::from_override(override_targets)?
+    };
+
+    if !targets.contains(host_target) {
+        return Err(ProjectError::CurrentHostMissingFromLockTargets {
+            host: host_target.to_string(),
+            targets: targets.as_slice().to_vec(),
+        });
+    }
+
+    Ok(targets)
+}
+
+fn resolution_strategy(targets: &LockTargetSet) -> &'static str {
+    if targets.len() > 1 {
+        MULTI_TARGET_RESOLUTION_STRATEGY
+    } else {
+        CURRENT_RESOLUTION_STRATEGY
+    }
+}
+
 fn dependency_fingerprint(input: &ProjectSyncInput) -> String {
     let mut digest = Sha256::new();
     // Keep the fingerprint scoped to declared project inputs. Interpreter,
@@ -499,22 +553,23 @@ fn lock_freshness(
     input: &ProjectSyncInput,
     env: &ResolverEnvironment,
     index_url: &str,
+    resolution_strategy: &str,
 ) -> LockFreshness {
     LockFreshness {
         dependency_fingerprint: dependency_fingerprint(input),
         interpreter_version: env.python_full_version.clone(),
         target_triple: env.target_triple.clone(),
         index_url: index_url.to_string(),
-        resolution_strategy: CURRENT_RESOLUTION_STRATEGY.to_string(),
+        resolution_strategy: resolution_strategy.to_string(),
     }
 }
 
 async fn resolve_lock(
     input: &ProjectSyncInput,
-    env: &ResolverEnvironment,
+    environments: &[ResolverEnvironment],
     freshness: &LockFreshness,
 ) -> Result<LockFile, ProjectError> {
-    resolve_lock_for_environments(input, std::slice::from_ref(env), freshness).await
+    resolve_lock_for_environments(input, environments, freshness).await
 }
 
 /// Multi-target lock generation resolves one environment at a time so the
@@ -951,7 +1006,12 @@ python = "3.13.12"
             .expect("host environment");
         let linux = resolver_environment_for_target("3.13.12", "x86_64-unknown-linux-gnu")
             .expect("linux environment");
-        let mut freshness = lock_freshness(&input, &host, &index.base_url);
+        let mut freshness = lock_freshness(
+            &input,
+            &host,
+            &index.base_url,
+            super::CURRENT_RESOLUTION_STRATEGY,
+        );
         freshness.resolution_strategy = MULTI_TARGET_RESOLUTION_STRATEGY.to_string();
 
         let lock = resolve_lock_for_environments(&input, &[host, linux], &freshness)
@@ -1036,7 +1096,12 @@ python = "3.13.12"
             .expect("host environment");
         let macos = resolver_environment_for_target("3.13.12", "x86_64-apple-darwin")
             .expect("macOS environment");
-        let mut freshness = lock_freshness(&input, &host, &index.base_url);
+        let mut freshness = lock_freshness(
+            &input,
+            &host,
+            &index.base_url,
+            super::CURRENT_RESOLUTION_STRATEGY,
+        );
         freshness.resolution_strategy = MULTI_TARGET_RESOLUTION_STRATEGY.to_string();
 
         let lock = resolve_lock_for_environments(&input, &[host, macos], &freshness)
@@ -1087,7 +1152,12 @@ python = "3.13.12"
             .expect("host environment");
         let linux = resolver_environment_for_target("3.13.12", "x86_64-unknown-linux-gnu")
             .expect("linux environment");
-        let mut freshness = lock_freshness(&input, &host, &index.base_url);
+        let mut freshness = lock_freshness(
+            &input,
+            &host,
+            &index.base_url,
+            super::CURRENT_RESOLUTION_STRATEGY,
+        );
         freshness.resolution_strategy = MULTI_TARGET_RESOLUTION_STRATEGY.to_string();
 
         let error = resolve_lock_for_environments(&input, &[host, linux], &freshness)

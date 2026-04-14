@@ -53,6 +53,12 @@ pub enum ProjectError {
         #[source]
         source: PythonError,
     },
+    #[error("invalid lock target configuration in {context}")]
+    InvalidLockTargets { context: String, detail: String },
+    #[error("unsupported lock target `{value}` in {context}")]
+    UnsupportedLockTarget { context: String, value: String },
+    #[error("the selected lock targets do not include the current host target")]
+    CurrentHostMissingFromLockTargets { host: String, targets: Vec<String> },
     #[error("no Pyra-managed Python is installed")]
     NoManagedPythonInstalled,
     #[error("failed to create the centralized environment at {path}")]
@@ -327,6 +333,27 @@ impl UserFacingError for ProjectError {
             .with_detail("Pyra only accepts numeric version selectors like `3`, `3.13`, or `3.13.2` in project configuration.")
             .with_suggestion("Update the pinned version to a valid numeric selector and retry.")
             .with_verbose_detail(format!("value `{value}`: {source}")),
+            Self::InvalidLockTargets { context, detail } => ErrorReport::new(
+                ErrorKind::User,
+                format!("Pyra could not read lock targets from {context}."),
+            )
+            .with_detail("Lock targets must be a non-empty list of supported target triple strings so Pyra can build one coherent lock matrix.")
+            .with_suggestion("Use supported target triples like `aarch64-apple-darwin` or `x86_64-unknown-linux-gnu`, then retry.")
+            .with_verbose_detail(detail.clone()),
+            Self::UnsupportedLockTarget { context, value } => ErrorReport::new(
+                ErrorKind::User,
+                format!("Pyra does not support lock target `{value}`."),
+            )
+            .with_detail(format!("The target listed in {context} is not one of Pyra's supported lock targets."))
+            .with_suggestion("Choose a supported macOS or Linux target triple and retry.")
+            .with_verbose_detail(value.clone()),
+            Self::CurrentHostMissingFromLockTargets { host, targets } => ErrorReport::new(
+                ErrorKind::User,
+                format!("Pyra cannot sync this project because the selected lock targets do not include `{host}`."),
+            )
+            .with_detail("`pyra sync` always reconciles the current host environment, so the target set used for lock generation must include the current host target.")
+            .with_suggestion(format!("Add `{host}` to `[tool.pyra].targets` or pass `--target {host}`, then retry."))
+            .with_verbose_detail(targets.join(", ")),
             Self::NoManagedPythonInstalled => ErrorReport::new(
                 ErrorKind::User,
                 "No Pyra-managed Python is installed yet.",

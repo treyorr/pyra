@@ -35,6 +35,7 @@ Pyra currently reads:
 - `[build-system]` presence
 - `[dependency-groups]`
 - `[tool.pyra].python`
+- `[tool.pyra].targets`
 
 ## Current Inputs Pyra Writes
 
@@ -68,15 +69,22 @@ Current command requirements:
 `[tool.pyra]` exists to hold Pyra-specific project state that should not be
 confused with packaging metadata.
 
-Current field:
+Current fields:
 
 - `python`
+- `targets`
 
 Current meaning:
 
 - This is the project's selected Pyra-managed interpreter request.
 - It is the contract between project state and environment/lock workflows.
 - It is required for `pyra sync` in the current model.
+
+- This is the optional lock-generation target set for the project.
+- Each value is one supported target triple string.
+- When omitted, `pyra sync` defaults to the current host target.
+- `pyra sync --target ...` may override this set for one invocation without
+  rewriting `pyproject.toml`.
 
 Pyra should keep this table small and intentional.
 

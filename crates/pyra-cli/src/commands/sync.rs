@@ -18,6 +18,7 @@ pub async fn execute(args: SyncArgs, context: &AppContext) -> Result<Output, Com
             context,
             SyncProjectRequest {
                 lock_mode,
+                lock_targets: args.targets,
                 selection: SyncSelectionRequest {
                     groups: args.groups,
                     extras: args.extras,

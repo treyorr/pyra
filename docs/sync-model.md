@@ -16,13 +16,17 @@ The current sync input model includes:
 
 - Project root and stable project identity.
 - Pinned managed interpreter from `[tool.pyra].python`.
+- Lock-generation targets from `[tool.pyra].targets` or one `pyra sync`
+  invocation override.
 - `[project].dependencies`.
 - `[project.optional-dependencies]`.
 - `[dependency-groups]`, including `{ include-group = "..." }`.
 - Whether a build system is present.
 
 Sync fails if the project does not pin a Python version first. `pyra sync`
-targets one Pyra-managed interpreter and one current platform in this slice.
+always reconciles one Pyra-managed interpreter on the current host platform. The
+lock it generates may describe one host target or a narrow multi-target matrix
+that still includes the current host.
 If `[project].requires-python` is present, sync also fails before lock reuse or
 resolution when that selected interpreter falls outside the declared range.
 
@@ -32,7 +36,7 @@ resolution when that selected interpreter falls outside the declared range.
 
 - The normalized dependency input fingerprint.
 - The selected interpreter version.
-- The target triple.
+- The selected lock target set.
 - The index URL.
 - The resolution strategy identifier.
 
@@ -60,16 +64,16 @@ stale. Installation still applies from the recorded lock contents.
 
 ## Resolution Scope
 
-The current resolver computes one union resolution for:
+The current resolver computes one union resolution per target environment for:
 
 - Base project dependencies.
 - All dependency groups.
 - All extras.
 
-That union is resolved for the selected interpreter and current platform only.
-This keeps the first lock implementation small and coherent, but it means Pyra
-may reject projects where separate groups or extras are independently valid but
-conflict when solved together.
+Each target environment still resolves the same union of scopes. This keeps the
+first lock implementation small and coherent, but it means Pyra may reject
+projects where separate groups or extras are independently valid but conflict
+when solved together.
 
 The current strategy identifier is `environment-scoped-union-v1`.
 

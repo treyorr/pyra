@@ -5,6 +5,7 @@
 //! project formatting, which will matter more once project metadata grows and
 //! package-manager commands start mutating standard dependency inputs.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::str::FromStr;
 
@@ -15,6 +16,13 @@ use pyra_python::{PythonVersion, PythonVersionRequest};
 use toml_edit::{Array, DocumentMut, Item, Table, Value, value};
 
 use crate::ProjectError;
+
+const SUPPORTED_LOCK_TARGETS: &[&str] = &[
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-linux-gnu",
+];
 
 /// The manifest scope a dependency declaration belongs to.
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -40,6 +48,40 @@ pub struct PyprojectMutationOutcome {
     pub changed: bool,
 }
 
+/// Normalized lock-generation target intent for one sync invocation.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct LockTargetSet {
+    targets: Vec<String>,
+}
+
+impl LockTargetSet {
+    /// The current host remains the default target when a project has not
+    /// declared a wider lock matrix.
+    pub fn single(target: impl Into<String>) -> Self {
+        Self {
+            targets: vec![target.into()],
+        }
+    }
+
+    /// CLI overrides and project config both normalize into a sorted set so
+    /// freshness treats target order as non-semantic.
+    pub fn from_override(targets: &[String]) -> Result<Self, ProjectError> {
+        normalize_lock_targets(targets, "`pyra sync --target`")
+    }
+
+    pub fn as_slice(&self) -> &[String] {
+        &self.targets
+    }
+
+    pub fn contains(&self, target: &str) -> bool {
+        self.targets.iter().any(|candidate| candidate == target)
+    }
+
+    pub fn len(&self) -> usize {
+        self.targets.len()
+    }
+}
+
 pub fn create_initial_pyproject(
     project_name: &str,
     selector: &PythonVersionRequest,
@@ -57,6 +99,11 @@ pub fn read_python_selector(
 ) -> Result<Option<PythonVersionRequest>, ProjectError> {
     let document = load_document(pyproject_path)?;
     read_selector_from_document(pyproject_path, &document)
+}
+
+pub fn read_lock_targets(pyproject_path: &Utf8Path) -> Result<Option<LockTargetSet>, ProjectError> {
+    let document = load_document(pyproject_path)?;
+    read_lock_targets_from_document(pyproject_path, &document)
 }
 
 pub fn update_python_selector(
@@ -212,6 +259,47 @@ fn read_selector_from_document(
         })
 }
 
+fn read_lock_targets_from_document(
+    pyproject_path: &Utf8Path,
+    document: &DocumentMut,
+) -> Result<Option<LockTargetSet>, ProjectError> {
+    let Some(item) = document
+        .as_table()
+        .get("tool")
+        .and_then(Item::as_table)
+        .and_then(|tool| tool.get("pyra"))
+        .and_then(Item::as_table)
+        .and_then(|pyra| pyra.get("targets"))
+    else {
+        return Ok(None);
+    };
+
+    let array = item
+        .as_array()
+        .ok_or_else(|| ProjectError::InvalidLockTargets {
+            context: format!("`[tool.pyra].targets` in `{pyproject_path}`"),
+            detail: "expected an array of target triple strings".to_string(),
+        })?;
+
+    let raw_targets = array
+        .iter()
+        .map(|value| {
+            value.as_str().map(ToString::to_string).ok_or_else(|| {
+                ProjectError::InvalidLockTargets {
+                    context: format!("`[tool.pyra].targets` in `{pyproject_path}`"),
+                    detail: "expected every target entry to be a string".to_string(),
+                }
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    normalize_lock_targets(
+        &raw_targets,
+        format!("`[tool.pyra].targets` in `{pyproject_path}`"),
+    )
+    .map(Some)
+}
+
 fn set_python_selector(document: &mut DocumentMut, selector: &PythonVersionRequest) {
     let root = document.as_table_mut();
     root.entry("tool").or_insert(Item::Table(Table::new()));
@@ -229,6 +317,34 @@ fn set_python_selector(document: &mut DocumentMut, selector: &PythonVersionReque
     // logic, so it always stays under `[tool.pyra]` rather than mixing with
     // standard packaging metadata.
     pyra["python"] = value(selector.to_string());
+}
+
+fn normalize_lock_targets(
+    raw_targets: &[String],
+    context: impl Into<String>,
+) -> Result<LockTargetSet, ProjectError> {
+    let context = context.into();
+    if raw_targets.is_empty() {
+        return Err(ProjectError::InvalidLockTargets {
+            context,
+            detail: "expected at least one target triple".to_string(),
+        });
+    }
+
+    let mut targets = BTreeSet::new();
+    for target in raw_targets {
+        if !SUPPORTED_LOCK_TARGETS.contains(&target.as_str()) {
+            return Err(ProjectError::UnsupportedLockTarget {
+                context: context.clone(),
+                value: target.clone(),
+            });
+        }
+        targets.insert(target.clone());
+    }
+
+    Ok(LockTargetSet {
+        targets: targets.into_iter().collect(),
+    })
 }
 
 fn dependency_array_mut<'a>(
@@ -502,7 +618,7 @@ mod tests {
 
     use super::{
         DependencyDeclarationScope, add_dependency_requirement, create_initial_pyproject,
-        normalize_name, read_python_selector, remove_dependency_requirement,
+        normalize_name, read_lock_targets, read_python_selector, remove_dependency_requirement,
         update_python_selector,
     };
     use pep508_rs::Requirement;
@@ -550,6 +666,53 @@ python = "3.12"
 
         assert!(contents.contains("[tool.pyra]"));
         assert!(contents.contains("python = \"3.13\""));
+    }
+
+    #[test]
+    fn reads_and_normalizes_tool_pyra_targets() {
+        let fixture = write_pyproject(
+            r#"[project]
+name = "sample"
+version = "0.1.0"
+
+[tool.pyra]
+python = "3.13"
+targets = ["x86_64-unknown-linux-gnu", "aarch64-apple-darwin", "x86_64-unknown-linux-gnu"]
+"#,
+        );
+
+        let targets = read_lock_targets(&fixture.path)
+            .expect("read targets")
+            .expect("declared targets");
+
+        assert_eq!(
+            targets.as_slice(),
+            &[
+                "aarch64-apple-darwin".to_string(),
+                "x86_64-unknown-linux-gnu".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_unsupported_tool_pyra_target() {
+        let fixture = write_pyproject(
+            r#"[project]
+name = "sample"
+version = "0.1.0"
+
+[tool.pyra]
+python = "3.13"
+targets = ["windows-x86_64-msvc"]
+"#,
+        );
+
+        let error = read_lock_targets(&fixture.path).expect_err("unsupported target fails");
+
+        assert!(matches!(
+            error,
+            ProjectError::UnsupportedLockTarget { ref value, .. } if value == "windows-x86_64-msvc"
+        ));
     }
 
     #[test]

@@ -15,7 +15,9 @@ use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, Value};
 use crate::{
     ProjectError,
     identity::{ProjectIdentity, find_project_root},
-    pyproject::{read_python_selector, validate_requires_python_constraint},
+    pyproject::{
+        LockTargetSet, read_lock_targets, read_python_selector, validate_requires_python_constraint,
+    },
     sync::selection::{SYNTHETIC_DEFAULT_GROUP, normalize_name},
 };
 
@@ -49,6 +51,7 @@ pub struct ProjectSyncInput {
     pub pylock_path: Utf8PathBuf,
     pub project_name: String,
     pub pinned_python: PythonVersionRequest,
+    pub declared_lock_targets: Option<LockTargetSet>,
     pub requires_python: Option<String>,
     pub build_system_present: bool,
     pub dependencies: Vec<ProjectSyncRequirement>,
@@ -92,6 +95,7 @@ impl ProjectSyncInputLoader {
         let document = load_document(&pyproject_path)?;
         let pinned_python = read_python_selector(&pyproject_path)?
             .ok_or(ProjectError::PinnedPythonNotConfigured)?;
+        let declared_lock_targets = read_lock_targets(&pyproject_path)?;
         let project = document
             .as_table()
             .get("project")
@@ -133,6 +137,7 @@ impl ProjectSyncInputLoader {
             pylock_path,
             project_name,
             pinned_python,
+            declared_lock_targets,
             requires_python: project
                 .get("requires-python")
                 .and_then(Item::as_str)
