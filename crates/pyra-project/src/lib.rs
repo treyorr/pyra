@@ -8,6 +8,7 @@ mod outdated;
 mod pyproject;
 mod service;
 mod sync;
+mod update;
 
 pub use doctor::{DoctorIssue, DoctorIssueCode, DoctorProjectOutcome};
 pub use environment::{ProjectEnvironmentRecord, ProjectPythonSelection};
@@ -22,7 +23,9 @@ pub use service::{
     AddProjectOutcome, AddProjectRequest, DoctorProjectRequest, InitProjectRequest,
     InitProjectWithPythonOutcome, LockProjectOutcome, LockProjectRequest, LockProjectStatus,
     OutdatedProjectRequest, ProjectService, RemoveProjectOutcome, RemoveProjectRequest,
-    RunProjectOutcome, RunProjectRequest, UseProjectPythonOutcome, UseProjectPythonRequest,
+    RunProjectOutcome, RunProjectRequest, UpdateProjectRequest, UseProjectPythonOutcome,
+    UseProjectPythonRequest,
 };
 pub use service::{SyncLockMode, SyncProjectOutcome, SyncProjectRequest};
 pub use sync::SyncSelectionRequest;
+pub use update::{UpdatePackageChange, UpdatePackageChangeKind, UpdateProjectOutcome};

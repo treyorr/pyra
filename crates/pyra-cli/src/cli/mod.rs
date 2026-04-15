@@ -37,6 +37,8 @@ pub enum Command {
     Doctor(DoctorArgs),
     /// Report newer available package versions without mutating project state.
     Outdated(OutdatedArgs),
+    /// Refresh lock state to newer versions allowed by existing specifiers.
+    Update(UpdateArgs),
     /// Execute a project command through the synchronized centralized environment.
     Run(RunArgs),
 }
@@ -163,6 +165,13 @@ pub struct DoctorArgs {}
 
 #[derive(Debug, Args)]
 pub struct OutdatedArgs {}
+
+#[derive(Debug, Args)]
+pub struct UpdateArgs {
+    /// Show the lock rewrite summary without writing `pylock.toml`.
+    #[arg(long)]
+    pub dry_run: bool,
+}
 
 #[derive(Debug, Args)]
 #[command(trailing_var_arg = true)]

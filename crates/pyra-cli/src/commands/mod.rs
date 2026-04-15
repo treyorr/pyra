@@ -8,6 +8,7 @@ mod python;
 mod remove;
 mod run;
 mod sync;
+mod update;
 mod use_python;
 
 use pyra_core::AppContext;
@@ -19,7 +20,7 @@ use thiserror::Error;
 
 use crate::cli::{
     AddArgs, Command, DoctorArgs, InitArgs, LockArgs, OutdatedArgs, PythonArgs, RemoveArgs,
-    RunArgs, SyncArgs, UseArgs,
+    RunArgs, SyncArgs, UpdateArgs, UseArgs,
 };
 
 #[derive(Debug, Error)]
@@ -90,6 +91,9 @@ pub async fn execute(
         Command::Outdated(args) => execute_outdated(args, context)
             .await
             .map(CommandExecution::success),
+        Command::Update(args) => execute_update(args, context)
+            .await
+            .map(CommandExecution::success),
         Command::Run(args) => execute_run(args, context).await,
     }
 }
@@ -131,6 +135,10 @@ async fn execute_outdated(
     context: &AppContext,
 ) -> Result<Output, CommandError> {
     outdated::execute(args, context).await
+}
+
+async fn execute_update(args: UpdateArgs, context: &AppContext) -> Result<Output, CommandError> {
+    update::execute(args, context).await
 }
 
 async fn execute_run(

@@ -1139,6 +1139,216 @@ python = "3.13.12"
 }
 
 #[test]
+fn update_rewrites_lock_to_latest_allowed_versions() {
+    let home = temp_env_root();
+    let initial_index = start_fixture_index();
+    let update_index = start_conflict_fixture_index();
+    let project_root = home.path().join("workspace").join("sample-update-rewrite");
+    fs::create_dir_all(&project_root).expect("project root");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        r#"[project]
+name = "sample-update-rewrite"
+version = "0.1.0"
+requires-python = "==3.13.*"
+dependencies = ["shared>=1,<3"]
+
+[tool.pyra]
+python = "3.13.12"
+"#,
+    )
+    .expect("pyproject");
+
+    seed_managed_install(&home, "3.13.12").expect("managed install");
+    let state_path = home.path().join("installer-state.json");
+    fs::write(
+        &state_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "sentinel": "1.0.0"
+        }))
+        .expect("state json"),
+    )
+    .expect("state");
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .env("PYRA_INDEX_URL", &initial_index.base_url)
+        .args(["lock"])
+        .assert()
+        .success();
+
+    let pyproject_path = project_root.join("pyproject.toml");
+    let pyproject_before = fs::read_to_string(&pyproject_path).expect("pyproject");
+    let lock_path = project_root.join("pylock.toml");
+    let initial_lock = fs::read_to_string(&lock_path).expect("pylock");
+    assert!(initial_lock.contains("name = \"shared\""));
+    assert!(initial_lock.contains("version = \"1.5.0\""));
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .env("PYRA_INDEX_URL", &update_index.base_url)
+        .args(["update"])
+        .assert()
+        .success()
+        .stdout(contains("Updated `pylock.toml`"))
+        .stdout(contains("shared: 1.5.0 -> 2.0.0"));
+
+    let updated_lock = fs::read_to_string(&lock_path).expect("pylock");
+    assert!(updated_lock.contains("name = \"shared\""));
+    assert!(updated_lock.contains("version = \"2.0.0\""));
+    assert!(!updated_lock.contains("version = \"1.5.0\""));
+    assert_eq!(
+        fs::read_to_string(&pyproject_path).expect("pyproject"),
+        pyproject_before
+    );
+    assert_eq!(
+        read_state(&state_path),
+        std::collections::BTreeMap::from([("sentinel".to_string(), "1.0.0".to_string())])
+    );
+    let environment_entries = fs::read_dir(home.path().join("data").join("environments"))
+        .expect("environments dir")
+        .count();
+    assert_eq!(
+        environment_entries, 0,
+        "`pyra update` should not reconcile the environment"
+    );
+}
+
+#[test]
+fn update_dry_run_reports_summary_without_writing_lock() {
+    let home = temp_env_root();
+    let initial_index = start_fixture_index();
+    let update_index = start_conflict_fixture_index();
+    let project_root = home.path().join("workspace").join("sample-update-dry-run");
+    fs::create_dir_all(&project_root).expect("project root");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        r#"[project]
+name = "sample-update-dry-run"
+version = "0.1.0"
+requires-python = "==3.13.*"
+dependencies = ["shared>=1,<3"]
+
+[tool.pyra]
+python = "3.13.12"
+"#,
+    )
+    .expect("pyproject");
+
+    seed_managed_install(&home, "3.13.12").expect("managed install");
+    let state_path = home.path().join("installer-state.json");
+    fs::write(
+        &state_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "sentinel": "1.0.0"
+        }))
+        .expect("state json"),
+    )
+    .expect("state");
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .env("PYRA_INDEX_URL", &initial_index.base_url)
+        .args(["lock"])
+        .assert()
+        .success();
+
+    let pyproject_path = project_root.join("pyproject.toml");
+    let pyproject_before = fs::read_to_string(&pyproject_path).expect("pyproject");
+    let lock_path = project_root.join("pylock.toml");
+    let lock_before = fs::read_to_string(&lock_path).expect("pylock");
+    assert!(lock_before.contains("version = \"1.5.0\""));
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .env("PYRA_INDEX_URL", &update_index.base_url)
+        .args(["update", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(contains("Dry run"))
+        .stdout(contains("shared: 1.5.0 -> 2.0.0"))
+        .stdout(contains("left `pylock.toml` unchanged"));
+
+    assert_eq!(
+        fs::read_to_string(&pyproject_path).expect("pyproject"),
+        pyproject_before
+    );
+    assert_eq!(fs::read_to_string(&lock_path).expect("pylock"), lock_before);
+    assert_eq!(
+        read_state(&state_path),
+        std::collections::BTreeMap::from([("sentinel".to_string(), "1.0.0".to_string())])
+    );
+}
+
+#[test]
+fn update_lock_rewrite_is_deterministic_for_unchanged_inputs() {
+    let home = temp_env_root();
+    let initial_index = start_fixture_index();
+    let update_index = start_conflict_fixture_index();
+    let project_root = home
+        .path()
+        .join("workspace")
+        .join("sample-update-deterministic");
+    fs::create_dir_all(&project_root).expect("project root");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        r#"[project]
+name = "sample-update-deterministic"
+version = "0.1.0"
+requires-python = "==3.13.*"
+dependencies = ["shared>=1,<3"]
+
+[tool.pyra]
+python = "3.13.12"
+"#,
+    )
+    .expect("pyproject");
+
+    seed_managed_install(&home, "3.13.12").expect("managed install");
+    let state_path = home.path().join("installer-state.json");
+    fs::write(
+        &state_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "sentinel": "1.0.0"
+        }))
+        .expect("state json"),
+    )
+    .expect("state");
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .env("PYRA_INDEX_URL", &initial_index.base_url)
+        .args(["lock"])
+        .assert()
+        .success();
+
+    let lock_path = project_root.join("pylock.toml");
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .env("PYRA_INDEX_URL", &update_index.base_url)
+        .args(["update"])
+        .assert()
+        .success()
+        .stdout(contains("shared: 1.5.0 -> 2.0.0"));
+    let first_rewrite = fs::read_to_string(&lock_path).expect("pylock");
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .env("PYRA_INDEX_URL", &update_index.base_url)
+        .args(["update"])
+        .assert()
+        .success()
+        .stdout(contains("with no package changes"));
+    let second_rewrite = fs::read_to_string(&lock_path).expect("pylock");
+
+    assert_eq!(first_rewrite, second_rewrite);
+    assert_eq!(
+        read_state(&state_path),
+        std::collections::BTreeMap::from([("sentinel".to_string(), "1.0.0".to_string())])
+    );
+}
+
+#[test]
 fn sync_locked_fails_when_lock_is_missing() {
     let home = temp_env_root();
     let project_root = home

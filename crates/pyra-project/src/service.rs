@@ -37,6 +37,7 @@ use crate::{
         LockSelection, MULTI_TARGET_RESOLUTION_STRATEGY, ProjectSyncInput, ProjectSyncInputLoader,
         ReconciliationPlan, SyncSelectionRequest, SyncSelectionResolver,
     },
+    update::{UpdatePackageChange, UpdatePackageChangeKind, UpdateProjectOutcome},
 };
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -133,6 +134,13 @@ pub struct DoctorProjectRequest;
 /// current dependency intent and lock state.
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
 pub struct OutdatedProjectRequest;
+
+/// Request to refresh lock state to the latest versions allowed by current
+/// dependency specifiers.
+#[derive(Debug, Clone, Default, Eq, PartialEq)]
+pub struct UpdateProjectRequest {
+    pub dry_run: bool,
+}
 
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
 pub struct SyncProjectRequest {
@@ -612,6 +620,39 @@ impl ProjectService {
         })
     }
 
+    pub async fn update(
+        self,
+        context: &AppContext,
+        request: UpdateProjectRequest,
+    ) -> Result<UpdateProjectOutcome, ProjectError> {
+        let prepared = prepare_lock_context(context, &[])?;
+        let previous_lock = read_previous_lock_for_update(&prepared.input.pylock_path)?;
+        let refreshed_lock = resolve_lock(
+            &prepared.input,
+            &prepared.resolver_environments,
+            &prepared.freshness,
+        )
+        .await?;
+        let summary = summarize_update_changes(previous_lock.as_ref(), &refreshed_lock);
+
+        if !request.dry_run {
+            refreshed_lock.write()?;
+        }
+
+        Ok(UpdateProjectOutcome {
+            project_root: prepared.input.project_root,
+            pyproject_path: prepared.input.pyproject_path,
+            pylock_path: prepared.input.pylock_path,
+            project_id: prepared.identity.id,
+            python_version: prepared.installation.version.to_string(),
+            dry_run: request.dry_run,
+            previous_lock_exists: previous_lock.is_some(),
+            total_packages: refreshed_lock.packages.len(),
+            unchanged_packages: summary.unchanged_packages,
+            package_changes: summary.package_changes,
+        })
+    }
+
     pub fn select_latest_installed_python(
         installations: &[InstalledPythonRecord],
     ) -> Result<InstalledPythonRecord, ProjectError> {
@@ -745,6 +786,105 @@ fn doctor_issue(
         detail: detail.into(),
         suggestion: suggestion.into(),
     }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct UpdateChangeSummary {
+    unchanged_packages: usize,
+    package_changes: Vec<UpdatePackageChange>,
+}
+
+fn read_previous_lock_for_update(
+    lock_path: &camino::Utf8Path,
+) -> Result<Option<LockFile>, ProjectError> {
+    if !lock_path.exists() {
+        return Ok(None);
+    }
+
+    match LockFile::read(lock_path) {
+        Ok(lock) => Ok(Some(lock)),
+        // Keep `pyra update` resilient to stale parser drift by resolving and
+        // rewriting lock state instead of failing on unreadable old metadata.
+        Err(ProjectError::ParseLockfile { .. }) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn summarize_update_changes(
+    previous_lock: Option<&LockFile>,
+    refreshed_lock: &LockFile,
+) -> UpdateChangeSummary {
+    let previous_versions = previous_lock
+        .map(lock_package_versions_by_name)
+        .unwrap_or_default();
+    let refreshed_versions = lock_package_versions_by_name(refreshed_lock);
+
+    let package_names = previous_versions
+        .keys()
+        .chain(refreshed_versions.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut unchanged_packages = 0usize;
+    let mut package_changes = Vec::new();
+    for package_name in package_names {
+        let previous = previous_versions.get(&package_name);
+        let refreshed = refreshed_versions.get(&package_name);
+        match (previous, refreshed) {
+            (Some((_, previous_version)), Some((_, refreshed_version)))
+                if previous_version == refreshed_version =>
+            {
+                unchanged_packages += 1;
+            }
+            (Some((display_name, previous_version)), Some((_, refreshed_version))) => {
+                package_changes.push(UpdatePackageChange {
+                    kind: UpdatePackageChangeKind::Updated,
+                    package: display_name.clone(),
+                    previous_version: Some(previous_version.clone()),
+                    resolved_version: Some(refreshed_version.clone()),
+                });
+            }
+            (Some((display_name, previous_version)), None) => {
+                package_changes.push(UpdatePackageChange {
+                    kind: UpdatePackageChangeKind::Removed,
+                    package: display_name.clone(),
+                    previous_version: Some(previous_version.clone()),
+                    resolved_version: None,
+                });
+            }
+            (None, Some((display_name, refreshed_version))) => {
+                package_changes.push(UpdatePackageChange {
+                    kind: UpdatePackageChangeKind::Added,
+                    package: display_name.clone(),
+                    previous_version: None,
+                    resolved_version: Some(refreshed_version.clone()),
+                });
+            }
+            (None, None) => {}
+        }
+    }
+    package_changes.sort_by(|left, right| left.package.cmp(&right.package));
+
+    UpdateChangeSummary {
+        unchanged_packages,
+        package_changes,
+    }
+}
+
+fn lock_package_versions_by_name(lock: &LockFile) -> BTreeMap<String, (String, String)> {
+    let mut versions: BTreeMap<String, (String, String)> = BTreeMap::new();
+    for package in &lock.packages {
+        let normalized_name = normalize_package_name(&package.name);
+        versions
+            .entry(normalized_name)
+            .and_modify(|(_, current_version)| {
+                if is_version_newer(&package.version, current_version.as_str()) {
+                    *current_version = package.version.clone();
+                }
+            })
+            .or_insert_with(|| (package.name.clone(), package.version.clone()));
+    }
+
+    versions
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
