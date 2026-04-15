@@ -2,6 +2,7 @@ mod add;
 mod doctor;
 mod init;
 mod lock;
+mod outdated;
 mod project_python;
 mod python;
 mod remove;
@@ -17,8 +18,8 @@ use pyra_ui::Output;
 use thiserror::Error;
 
 use crate::cli::{
-    AddArgs, Command, DoctorArgs, InitArgs, LockArgs, PythonArgs, RemoveArgs, RunArgs, SyncArgs,
-    UseArgs,
+    AddArgs, Command, DoctorArgs, InitArgs, LockArgs, OutdatedArgs, PythonArgs, RemoveArgs,
+    RunArgs, SyncArgs, UseArgs,
 };
 
 #[derive(Debug, Error)]
@@ -86,6 +87,9 @@ pub async fn execute(
         Command::Doctor(args) => execute_doctor(args, context)
             .await
             .map(CommandExecution::success),
+        Command::Outdated(args) => execute_outdated(args, context)
+            .await
+            .map(CommandExecution::success),
         Command::Run(args) => execute_run(args, context).await,
     }
 }
@@ -120,6 +124,13 @@ async fn execute_lock(args: LockArgs, context: &AppContext) -> Result<Output, Co
 
 async fn execute_doctor(args: DoctorArgs, context: &AppContext) -> Result<Output, CommandError> {
     doctor::execute(args, context).await
+}
+
+async fn execute_outdated(
+    args: OutdatedArgs,
+    context: &AppContext,
+) -> Result<Output, CommandError> {
+    outdated::execute(args, context).await
 }
 
 async fn execute_run(

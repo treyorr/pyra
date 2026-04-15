@@ -1019,6 +1019,126 @@ python = "3.13.12"
 }
 
 #[test]
+fn outdated_reports_package_level_upgrade_opportunities() {
+    let home = temp_env_root();
+    let index = start_conflict_fixture_index();
+    let project_root = home.path().join("workspace").join("sample-outdated-report");
+    fs::create_dir_all(&project_root).expect("project root");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        r#"[project]
+name = "sample-outdated-report"
+version = "0.1.0"
+requires-python = "==3.13.*"
+dependencies = ["shared>=1,<3"]
+
+[tool.pyra]
+python = "3.13.12"
+"#,
+    )
+    .expect("pyproject");
+
+    seed_managed_install(&home, "3.13.12").expect("managed install");
+    let state_path = home.path().join("installer-state.json");
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .env("PYRA_INDEX_URL", &index.base_url)
+        .args(["sync"])
+        .assert()
+        .success();
+
+    let lock_path = project_root.join("pylock.toml");
+    let downgraded_lock = fs::read_to_string(&lock_path)
+        .expect("pylock")
+        .replace("version = \"2.0.0\"", "version = \"1.5.0\"");
+    fs::write(&lock_path, &downgraded_lock).expect("downgraded lock");
+
+    let output = base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .env("PYRA_INDEX_URL", &index.base_url)
+        .args(["outdated"])
+        .output()
+        .expect("outdated output");
+    assert!(
+        output.status.success(),
+        "outdated should report warnings, not fail"
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout utf-8");
+    assert!(stdout.contains("Found 1 outdated package(s)"));
+    assert!(stdout.contains("shared: 1.5.0 -> 2.0.0"));
+
+    let current_lock = fs::read_to_string(&lock_path).expect("pylock");
+    assert_eq!(current_lock, downgraded_lock);
+}
+
+#[test]
+fn outdated_json_mode_does_not_mutate_manifest_or_lock() {
+    let home = temp_env_root();
+    let index = start_conflict_fixture_index();
+    let project_root = home
+        .path()
+        .join("workspace")
+        .join("sample-outdated-no-mutation");
+    fs::create_dir_all(&project_root).expect("project root");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        r#"[project]
+name = "sample-outdated-no-mutation"
+version = "0.1.0"
+requires-python = "==3.13.*"
+dependencies = ["shared>=1,<3"]
+
+[tool.pyra]
+python = "3.13.12"
+"#,
+    )
+    .expect("pyproject");
+
+    seed_managed_install(&home, "3.13.12").expect("managed install");
+    let state_path = home.path().join("installer-state.json");
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .env("PYRA_INDEX_URL", &index.base_url)
+        .args(["sync"])
+        .assert()
+        .success();
+
+    let pyproject_path = project_root.join("pyproject.toml");
+    let lock_path = project_root.join("pylock.toml");
+    let downgraded_lock = fs::read_to_string(&lock_path)
+        .expect("pylock")
+        .replace("version = \"2.0.0\"", "version = \"1.5.0\"");
+    fs::write(&lock_path, &downgraded_lock).expect("downgraded lock");
+
+    let pyproject_before = fs::read_to_string(&pyproject_path).expect("pyproject");
+    let lock_before = fs::read_to_string(&lock_path).expect("pylock");
+
+    let output = base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .env("PYRA_INDEX_URL", &index.base_url)
+        .args(["--json", "outdated"])
+        .output()
+        .expect("outdated json output");
+    assert!(
+        output.status.success(),
+        "outdated should succeed in json mode"
+    );
+    assert!(output.stderr.is_empty(), "json mode should not emit stderr");
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout utf-8");
+    assert!(stdout.contains("\"status\": \"warn\""));
+    assert!(stdout.contains("shared: 1.5.0 -> 2.0.0"));
+
+    let pyproject_after = fs::read_to_string(&pyproject_path).expect("pyproject");
+    let lock_after = fs::read_to_string(&lock_path).expect("pylock");
+    assert_eq!(pyproject_after, pyproject_before);
+    assert_eq!(lock_after, lock_before);
+}
+
+#[test]
 fn sync_locked_fails_when_lock_is_missing() {
     let home = temp_env_root();
     let project_root = home

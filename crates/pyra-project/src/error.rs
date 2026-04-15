@@ -156,6 +156,10 @@ pub enum ProjectError {
     MissingLockfileForFrozenSync { path: String },
     #[error("`sync --frozen` requires a fresh lock file at {path}")]
     StaleLockfileForFrozenSync { path: String },
+    #[error("`outdated` requires an existing lock file at {path}")]
+    MissingLockfileForOutdated { path: String },
+    #[error("`outdated` requires a fresh lock file at {path}")]
+    StaleLockfileForOutdated { path: String },
     #[error("failed to read pylock.toml at {path}")]
     ReadLockfile {
         path: String,
@@ -584,6 +588,24 @@ impl UserFacingError for ProjectError {
             )
             .with_detail("The current project or resolution inputs no longer match the recorded lock freshness data, and `--frozen` never regenerates the lock.")
             .with_suggestion("Run `pyra sync` to refresh `pylock.toml`, then rerun `pyra sync --frozen`.")
+            .with_verbose_detail(path.clone()),
+            Self::MissingLockfileForOutdated { path } => ErrorReport::new(
+                ErrorKind::User,
+                "Pyra could not run `outdated` because `pylock.toml` is missing.",
+            )
+            .with_detail(
+                "`pyra outdated` compares currently locked versions to newer available versions and needs an existing lock state.",
+            )
+            .with_suggestion("Run `pyra lock` (or `pyra sync`) first, then rerun `pyra outdated`.")
+            .with_verbose_detail(path.clone()),
+            Self::StaleLockfileForOutdated { path } => ErrorReport::new(
+                ErrorKind::User,
+                "`pylock.toml` is stale, so `pyra outdated` stopped.",
+            )
+            .with_detail(
+                "Outdated checks compare against current dependency intent, so the lock must already be fresh for current project inputs.",
+            )
+            .with_suggestion("Run `pyra lock` (or `pyra sync`) to refresh the lock, then rerun `pyra outdated`.")
             .with_verbose_detail(path.clone()),
             Self::ReadLockfile { path, source } => ErrorReport::new(
                 ErrorKind::System,

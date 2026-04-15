@@ -35,6 +35,8 @@ pub enum Command {
     Lock(LockArgs),
     /// Diagnose project lock and environment health without mutating state.
     Doctor(DoctorArgs),
+    /// Report newer available package versions without mutating project state.
+    Outdated(OutdatedArgs),
     /// Execute a project command through the synchronized centralized environment.
     Run(RunArgs),
 }
@@ -158,6 +160,9 @@ pub struct LockArgs {
 
 #[derive(Debug, Args)]
 pub struct DoctorArgs {}
+
+#[derive(Debug, Args)]
+pub struct OutdatedArgs {}
 
 #[derive(Debug, Args)]
 #[command(trailing_var_arg = true)]

@@ -4,7 +4,7 @@
 //! environment preparation while leaving Python release resolution to the
 //! dedicated Python subsystem.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 
 use camino::Utf8PathBuf;
@@ -25,6 +25,7 @@ use crate::{
     execution::{ProjectExecutionRequest, ProjectExecutionService},
     identity::{ProjectIdentity, find_project_root},
     init::{InitProjectOutcome, create_initial_layout, validate_initial_layout},
+    outdated::{OutdatedPackage, OutdatedProjectOutcome},
     pyproject::{
         DependencyDeclarationScope, LockTargetSet, add_dependency_requirement,
         read_python_selector, remove_dependency_requirement, update_python_selector,
@@ -127,6 +128,11 @@ pub struct LockProjectOutcome {
 /// Request to run read-only project diagnostics.
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
 pub struct DoctorProjectRequest;
+
+/// Request to compute read-only dependency upgrade opportunities from the
+/// current dependency intent and lock state.
+#[derive(Debug, Clone, Default, Eq, PartialEq)]
+pub struct OutdatedProjectRequest;
 
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
 pub struct SyncProjectRequest {
@@ -531,6 +537,81 @@ impl ProjectService {
         })
     }
 
+    pub async fn outdated(
+        self,
+        context: &AppContext,
+        _request: OutdatedProjectRequest,
+    ) -> Result<OutdatedProjectOutcome, ProjectError> {
+        let prepared = prepare_lock_context(context, &[])?;
+        if !prepared.input.pylock_path.exists() {
+            return Err(ProjectError::MissingLockfileForOutdated {
+                path: prepared.input.pylock_path.to_string(),
+            });
+        }
+
+        let lock = LockFile::read(&prepared.input.pylock_path)?;
+        if !lock.is_fresh_for(&prepared.freshness, &prepared.lock_targets) {
+            return Err(ProjectError::StaleLockfileForOutdated {
+                path: prepared.input.pylock_path.to_string(),
+            });
+        }
+
+        // `pyra outdated` queries available versions against the same index and
+        // environment model as sync/lock, but never writes lock or manifest
+        // state.
+        let resolver_request = ResolutionRequestTemplate::new(
+            build_resolution_roots(&prepared.input),
+            prepared.freshness.index_url.clone(),
+        )
+        .for_environment(resolver_environment(&prepared.installation)?);
+        let latest_packages = Resolver::new()
+            .resolve(resolver_request)
+            .await
+            .map_err(|source| ProjectError::ResolveDependencies { source })?;
+        let latest_versions = package_versions_by_name(
+            latest_packages
+                .iter()
+                .map(|package| (package.name.as_str(), package.version.as_str())),
+        );
+        let locked_versions = package_versions_by_name(
+            lock.packages
+                .iter()
+                .map(|package| (package.name.as_str(), package.version.as_str())),
+        );
+
+        let intents = collect_declared_package_intents(&prepared.input);
+        let mut outdated_packages = Vec::new();
+        for intent in &intents {
+            let Some(current_version) = locked_versions.get(&intent.normalized_name) else {
+                continue;
+            };
+            let Some(latest_version) = latest_versions.get(&intent.normalized_name) else {
+                continue;
+            };
+            if !is_version_newer(latest_version, current_version) {
+                continue;
+            }
+
+            outdated_packages.push(OutdatedPackage {
+                package: intent.package.clone(),
+                current_version: current_version.clone(),
+                latest_version: latest_version.clone(),
+                requirements: intent.requirements.clone(),
+                declaration_scopes: intent.declaration_scopes.clone(),
+            });
+        }
+
+        Ok(OutdatedProjectOutcome {
+            project_root: prepared.input.project_root,
+            pyproject_path: prepared.input.pyproject_path,
+            pylock_path: prepared.input.pylock_path,
+            project_id: prepared.identity.id,
+            python_version: prepared.installation.version.to_string(),
+            checked_packages: intents.len(),
+            outdated_packages,
+        })
+    }
+
     pub fn select_latest_installed_python(
         installations: &[InstalledPythonRecord],
     ) -> Result<InstalledPythonRecord, ProjectError> {
@@ -663,6 +744,136 @@ fn doctor_issue(
         summary: summary.into(),
         detail: detail.into(),
         suggestion: suggestion.into(),
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct DeclaredPackageIntent {
+    package: String,
+    normalized_name: String,
+    requirements: Vec<String>,
+    declaration_scopes: Vec<String>,
+}
+
+fn collect_declared_package_intents(input: &ProjectSyncInput) -> Vec<DeclaredPackageIntent> {
+    let mut grouped = BTreeMap::<String, DeclaredPackageIntentAccumulator>::new();
+
+    for requirement in &input.dependencies {
+        merge_declared_requirement(
+            &mut grouped,
+            &requirement.requirement,
+            "[project].dependencies",
+        );
+    }
+    for group in &input.dependency_groups {
+        for requirement in &group.requirements {
+            merge_declared_requirement(
+                &mut grouped,
+                &requirement.requirement,
+                &format!("[dependency-groups].{}", group.name.display_name),
+            );
+        }
+    }
+    for extra in &input.optional_dependencies {
+        for requirement in &extra.requirements {
+            merge_declared_requirement(
+                &mut grouped,
+                &requirement.requirement,
+                &format!(
+                    "[project.optional-dependencies].{}",
+                    extra.name.display_name
+                ),
+            );
+        }
+    }
+
+    grouped
+        .into_iter()
+        .map(|(_, accumulator)| accumulator.finish())
+        .collect()
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct DeclaredPackageIntentAccumulator {
+    package: String,
+    normalized_name: String,
+    requirements: BTreeSet<String>,
+    declaration_scopes: BTreeSet<String>,
+}
+
+impl DeclaredPackageIntentAccumulator {
+    fn finish(self) -> DeclaredPackageIntent {
+        DeclaredPackageIntent {
+            package: self.package,
+            normalized_name: self.normalized_name,
+            requirements: self.requirements.into_iter().collect(),
+            declaration_scopes: self.declaration_scopes.into_iter().collect(),
+        }
+    }
+}
+
+fn merge_declared_requirement(
+    grouped: &mut BTreeMap<String, DeclaredPackageIntentAccumulator>,
+    requirement: &Requirement,
+    scope: &str,
+) {
+    let package = requirement.name.to_string();
+    let normalized_name = normalize_package_name(&package);
+    let entry = grouped.entry(normalized_name.clone()).or_insert_with(|| {
+        DeclaredPackageIntentAccumulator {
+            package: package.clone(),
+            normalized_name: normalized_name.clone(),
+            requirements: BTreeSet::new(),
+            declaration_scopes: BTreeSet::new(),
+        }
+    });
+    entry.requirements.insert(requirement.to_string());
+    entry.declaration_scopes.insert(scope.to_string());
+}
+
+fn normalize_package_name(name: &str) -> String {
+    let mut normalized = String::with_capacity(name.len());
+    let mut previous_was_dash = false;
+    for character in name.chars() {
+        let is_separator = matches!(character, '-' | '_' | '.');
+        if is_separator {
+            if !previous_was_dash {
+                normalized.push('-');
+                previous_was_dash = true;
+            }
+            continue;
+        }
+        normalized.push(character.to_ascii_lowercase());
+        previous_was_dash = false;
+    }
+    normalized
+}
+
+fn package_versions_by_name<'a>(
+    packages: impl Iterator<Item = (&'a str, &'a str)>,
+) -> BTreeMap<String, String> {
+    let mut versions: BTreeMap<String, String> = BTreeMap::new();
+    for (name, version) in packages {
+        let key = normalize_package_name(name);
+        versions
+            .entry(key)
+            .and_modify(|current| {
+                if is_version_newer(version, current.as_str()) {
+                    *current = version.to_string();
+                }
+            })
+            .or_insert_with(|| version.to_string());
+    }
+    versions
+}
+
+fn is_version_newer(candidate: &str, current: &str) -> bool {
+    match (
+        pep440_rs::Version::from_str(candidate),
+        pep440_rs::Version::from_str(current),
+    ) {
+        (Ok(candidate), Ok(current)) => candidate > current,
+        _ => candidate > current,
     }
 }
 

@@ -25,6 +25,7 @@ Then read the more specific docs that apply to the task:
 - `docs/lock-format-notes.md`
 - `docs/lock-command-model.md`
 - `docs/doctor-model.md`
+- `docs/outdated-model.md`
 - `docs/resolution-scope.md`
 - `docs/installer-boundary.md`
 - `docs/add-remove-model.md`
@@ -56,6 +57,9 @@ Then read the more specific docs that apply to the task:
   What `pyra lock` guarantees and how lock freshness messaging works.
 - `docs/doctor-model.md`
   What `pyra doctor` checks, how findings are reported, and why it stays read-only.
+- `docs/outdated-model.md`
+  What `pyra outdated` compares, how it reports package-level updates, and why
+  it stays read-only.
 - `docs/package-cache-model.md`
   How Pyra reuses verified package artifacts without changing lock authority.
 - `docs/resolution-scope.md`
