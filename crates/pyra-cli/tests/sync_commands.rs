@@ -1685,6 +1685,42 @@ python = "3.13.12"
 }
 
 #[test]
+fn sync_frozen_fails_when_lock_is_missing() {
+    let home = temp_env_root();
+    let project_root = home
+        .path()
+        .join("workspace")
+        .join("sample-sync-frozen-missing");
+    fs::create_dir_all(&project_root).expect("project root");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        r#"[project]
+name = "sample-sync-frozen-missing"
+version = "0.1.0"
+requires-python = "==3.13.*"
+dependencies = ["attrs==25.1.0"]
+
+[tool.pyra]
+python = "3.13.12"
+"#,
+    )
+    .expect("pyproject");
+
+    seed_managed_install(&home, "3.13.12").expect("managed install");
+    let state_path = home.path().join("installer-state.json");
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .args(["sync", "--frozen"])
+        .assert()
+        .failure()
+        .stderr(contains("sync --frozen"))
+        .stderr(contains("pylock.toml"));
+
+    assert!(!project_root.join("pylock.toml").exists());
+}
+
+#[test]
 fn sync_locked_fails_when_lock_is_stale() {
     let home = temp_env_root();
     let index = start_fixture_index();
@@ -1794,6 +1830,110 @@ python = "3.13.12"
 
     let second_lock = fs::read_to_string(project_root.join("pylock.toml")).expect("pylock");
     assert_eq!(first_lock, second_lock);
+}
+
+#[test]
+fn sync_regenerates_corrupt_lock_in_default_mode() {
+    let home = temp_env_root();
+    let index = start_fixture_index();
+    let project_root = home
+        .path()
+        .join("workspace")
+        .join("sample-sync-corrupt-regeneration");
+    fs::create_dir_all(&project_root).expect("project root");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        r#"[project]
+name = "sample-sync-corrupt-regeneration"
+version = "0.1.0"
+requires-python = "==3.13.*"
+dependencies = ["attrs==25.1.0"]
+
+[tool.pyra]
+python = "3.13.12"
+"#,
+    )
+    .expect("pyproject");
+
+    seed_managed_install(&home, "3.13.12").expect("managed install");
+    let state_path = home.path().join("installer-state.json");
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .env("PYRA_INDEX_URL", &index.base_url)
+        .args(["sync"])
+        .assert()
+        .success();
+    let lock_path = project_root.join("pylock.toml");
+    let fresh_lock = fs::read_to_string(&lock_path).expect("pylock");
+
+    let corrupt_lock = "lock-version = \"1.0\"\n[tool.pyra\n";
+    fs::write(&lock_path, corrupt_lock).expect("corrupt lock");
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .env("PYRA_INDEX_URL", &index.base_url)
+        .args(["sync"])
+        .assert()
+        .success()
+        .stdout(contains("Updated `pylock.toml`"));
+
+    let regenerated_lock = fs::read_to_string(&lock_path).expect("pylock");
+    assert_eq!(regenerated_lock, fresh_lock);
+    assert_ne!(regenerated_lock, corrupt_lock);
+}
+
+#[test]
+fn sync_locked_fails_when_lock_is_corrupt() {
+    let home = temp_env_root();
+    let index = start_fixture_index();
+    let project_root = home
+        .path()
+        .join("workspace")
+        .join("sample-sync-locked-corrupt");
+    fs::create_dir_all(&project_root).expect("project root");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        r#"[project]
+name = "sample-sync-locked-corrupt"
+version = "0.1.0"
+requires-python = "==3.13.*"
+dependencies = ["attrs==25.1.0"]
+
+[tool.pyra]
+python = "3.13.12"
+"#,
+    )
+    .expect("pyproject");
+
+    seed_managed_install(&home, "3.13.12").expect("managed install");
+    let state_path = home.path().join("installer-state.json");
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .env("PYRA_INDEX_URL", &index.base_url)
+        .args(["sync"])
+        .assert()
+        .success();
+
+    let lock_path = project_root.join("pylock.toml");
+    let corrupt_lock = "lock-version = \"1.0\"\n[tool.pyra\n";
+    fs::write(&lock_path, corrupt_lock).expect("corrupt lock");
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .env("PYRA_INDEX_URL", &index.base_url)
+        .args(["sync", "--locked"])
+        .assert()
+        .failure()
+        .stderr(contains("could not parse"))
+        .stderr(contains("pylock.toml"));
+
+    assert_eq!(
+        fs::read_to_string(&lock_path).expect("pylock"),
+        corrupt_lock,
+        "`sync --locked` should not rewrite an unreadable lock file"
+    );
 }
 
 #[test]
