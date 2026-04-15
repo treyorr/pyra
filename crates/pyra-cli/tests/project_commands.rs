@@ -8,6 +8,7 @@ use assert_cmd::Command;
 use flate2::{Compression, write::GzEncoder};
 use predicates::str::contains;
 use pyra_python::{ArchiveFormat, HostTarget, InstalledPythonRecord, PythonVersion};
+use serde_json::{Value, json};
 use tempfile::TempDir;
 
 #[test]
@@ -34,6 +35,52 @@ fn use_pins_python_and_prepares_centralized_environment() {
     assert!(pyproject.contains("[tool.pyra]"));
     assert!(pyproject.contains("python = \"3.13\""));
     assert_environment_prepared(home.path(), &project_root, "3.13");
+}
+
+#[test]
+fn use_json_contract_snapshot() {
+    let home = temp_env_root();
+    let fixture = write_catalog_fixture(home.path(), &["3.13.12"]);
+    let project_root = home.path().join("workspace").join("sample-use-json");
+    fs::create_dir_all(&project_root).expect("project root");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        "[project]\nname = \"sample-use-json\"\nversion = \"0.1.0\"\n",
+    )
+    .expect("pyproject");
+
+    let output = base_command(&home)
+        .current_dir(&project_root)
+        .env("PYRA_PYTHON_RELEASE_CATALOG_PATH", &fixture.catalog_path)
+        .args(["--json", "use", "3.13"])
+        .output()
+        .expect("use json output");
+
+    assert_json_contract(
+        &output,
+        json!({
+            "status": "success",
+            "exit": {
+                "code": 0,
+                "category": "success"
+            },
+            "output": {
+                "blocks": [
+                    {
+                        "type": "message",
+                        "value": {
+                            "tone": "success",
+                            "summary": "Using Python 3.13.12 for this project.",
+                            "detail": "Pinned `3.13` in `pyproject.toml` and prepared the centralized environment.",
+                            "hint": Value::Null,
+                            "verbose": []
+                        }
+                    }
+                ]
+            },
+            "error": Value::Null
+        }),
+    );
 }
 
 #[cfg(unix)]
@@ -274,6 +321,77 @@ fn init_with_python_uses_managed_install_flow() {
 }
 
 #[test]
+fn init_json_contract_snapshot() {
+    let home = temp_env_root();
+    let fixture = write_catalog_fixture(home.path(), &["3.13.12"]);
+    let project_root = home.path().join("workspace").join("sample-init-json");
+    fs::create_dir_all(&project_root).expect("project root");
+
+    let output = base_command(&home)
+        .current_dir(&project_root)
+        .env("PYRA_PYTHON_RELEASE_CATALOG_PATH", &fixture.catalog_path)
+        .args(["--json", "init", "--python", "3.13"])
+        .output()
+        .expect("init json output");
+    let canonical_project_root = project_root.canonicalize().expect("canonical project root");
+
+    assert_json_contract(
+        &output,
+        json!({
+            "status": "success",
+            "exit": {
+                "code": 0,
+                "category": "success"
+            },
+            "output": {
+                "blocks": [
+                    {
+                        "type": "message",
+                        "value": {
+                            "tone": "success",
+                            "summary": "Initialized `sample-init-json` with Python 3.13.12.",
+                            "detail": "Pinned `3.13` in `pyproject.toml` and prepared the centralized environment.",
+                            "hint": Value::Null,
+                            "verbose": []
+                        }
+                    },
+                    {
+                        "type": "list",
+                        "value": {
+                            "heading": "Created",
+                            "items": [
+                                {
+                                    "label": canonical_project_root.join("pyproject.toml").display().to_string(),
+                                    "detail": Value::Null,
+                                    "verbose": []
+                                },
+                                {
+                                    "label": canonical_project_root.join("main.py").display().to_string(),
+                                    "detail": Value::Null,
+                                    "verbose": []
+                                },
+                                {
+                                    "label": canonical_project_root.join("README.md").display().to_string(),
+                                    "detail": Value::Null,
+                                    "verbose": []
+                                },
+                                {
+                                    "label": canonical_project_root.join(".gitignore").display().to_string(),
+                                    "detail": Value::Null,
+                                    "verbose": []
+                                }
+                            ],
+                            "empty_message": Value::Null
+                        }
+                    }
+                ]
+            },
+            "error": Value::Null
+        }),
+    );
+}
+
+#[test]
 fn init_without_python_chooses_latest_managed_installation() {
     let home = temp_env_root();
     let project_root = home.path().join("workspace").join("sample-init-latest");
@@ -357,6 +475,43 @@ fn read_environment_metadata(home: &Path, _project_root: &Path) -> serde_json::V
 
     let metadata_path = entries[0].path().join("metadata.json");
     serde_json::from_slice(&fs::read(&metadata_path).expect("metadata")).expect("metadata json")
+}
+
+fn assert_json_contract(output: &std::process::Output, expected: Value) {
+    assert!(
+        output.status.success(),
+        "command should complete and return machine-readable output"
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "json mode should not emit stderr on successful command paths"
+    );
+
+    let stdout = String::from_utf8(output.stdout.clone()).expect("stdout utf-8");
+    let mut actual: Value = serde_json::from_str(&stdout).expect("json envelope");
+    let mut expected = expected;
+    strip_verbose_lines(&mut actual);
+    strip_verbose_lines(&mut expected);
+    assert_eq!(actual, expected);
+}
+
+fn strip_verbose_lines(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            if let Some(verbose) = map.get_mut("verbose") {
+                *verbose = json!([]);
+            }
+            for child in map.values_mut() {
+                strip_verbose_lines(child);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                strip_verbose_lines(item);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
 }
 
 fn seed_managed_install(home: &TempDir, version: &str) -> Result<(), Box<dyn std::error::Error>> {

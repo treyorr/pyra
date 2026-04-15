@@ -4,7 +4,7 @@ use std::process::Command as ProcessCommand;
 
 use assert_cmd::Command;
 use pyra_python::{ArchiveFormat, HostTarget, InstalledPythonRecord, PythonVersion};
-use serde_json::Value;
+use serde_json::{Value, json};
 use tempfile::TempDir;
 
 #[test]
@@ -143,6 +143,24 @@ python = "{python_version}"
         .expect("command output");
 
     assert_json_exit(&output, "fail", 7, "external", "run external code");
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout utf-8");
+    let envelope: Value = serde_json::from_str(&stdout).expect("json envelope");
+    assert_eq!(
+        envelope,
+        json!({
+            "status": "fail",
+            "exit": {
+                "code": 7,
+                "category": "external"
+            },
+            "output": {
+                "blocks": []
+            },
+            "error": Value::Null
+        }),
+        "run json contract should remain stable for external failures",
+    );
 }
 
 fn assert_json_exit(

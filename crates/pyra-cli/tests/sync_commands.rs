@@ -7,6 +7,7 @@ use std::process::Command as ProcessCommand;
 use assert_cmd::Command;
 use predicates::str::contains;
 use pyra_python::{ArchiveFormat, HostTarget, InstalledPythonRecord, PythonVersion};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
@@ -53,6 +54,61 @@ python = "3.13.12"
     let lock = fs::read_to_string(project_root.join("pylock.toml")).expect("pylock");
     assert!(lock.contains("default-groups = [\"pyra-default\", \"dev\"]"));
     assert!(lock.contains("dependency-groups = [\"dev\"]"));
+}
+
+#[test]
+fn sync_json_contract_snapshot_for_default_sync() {
+    let home = temp_env_root();
+    let project_root = home.path().join("workspace").join("sample-sync-json");
+    fs::create_dir_all(&project_root).expect("project root");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        r#"[project]
+name = "sample-sync-json"
+version = "0.1.0"
+dependencies = []
+
+[tool.pyra]
+python = "3.13.12"
+"#,
+    )
+    .expect("pyproject");
+
+    seed_managed_install(&home, "3.13.12").expect("managed install");
+    let state_path = home.path().join("installer-state.json");
+
+    let output = base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .args(["--json", "sync"])
+        .output()
+        .expect("sync json output");
+
+    let project_id = project_id_for(&project_root);
+    assert_json_contract(
+        &output,
+        json!({
+            "status": "success",
+            "exit": {
+                "code": 0,
+                "category": "success"
+            },
+            "output": {
+                "blocks": [
+                    {
+                        "type": "message",
+                        "value": {
+                            "tone": "success",
+                            "summary": format!("Synced `{project_id}` with Python 3.13.12."),
+                            "detail": "Updated `pylock.toml` and reconciled the centralized environment.",
+                            "hint": Value::Null,
+                            "verbose": []
+                        }
+                    }
+                ]
+            },
+            "error": Value::Null
+        }),
+    );
 }
 
 #[test]
@@ -754,6 +810,80 @@ python = "3.13.12"
 }
 
 #[test]
+fn lock_json_contract_snapshot_for_missing_lock_generation() {
+    let home = temp_env_root();
+    let project_root = home.path().join("workspace").join("sample-lock-json");
+    fs::create_dir_all(&project_root).expect("project root");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        r#"[project]
+name = "sample-lock-json"
+version = "0.1.0"
+dependencies = []
+
+[tool.pyra]
+python = "3.13.12"
+"#,
+    )
+    .expect("pyproject");
+    seed_managed_install(&home, "3.13.12").expect("managed install");
+
+    let state_path = home.path().join("installer-state.json");
+    fs::write(
+        &state_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "sentinel": "1.0.0"
+        }))
+        .expect("state json"),
+    )
+    .expect("state");
+
+    let output = base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .args(["--json", "lock"])
+        .output()
+        .expect("lock json output");
+
+    let project_id = project_id_for(&project_root);
+    assert_json_contract(
+        &output,
+        json!({
+            "status": "success",
+            "exit": {
+                "code": 0,
+                "category": "success"
+            },
+            "output": {
+                "blocks": [
+                    {
+                        "type": "message",
+                        "value": {
+                            "tone": "success",
+                            "summary": format!("Generated `pylock.toml` for `{project_id}`."),
+                            "detail": "No lock file existed, so Pyra resolved dependencies and wrote a new lock.",
+                            "hint": Value::Null,
+                            "verbose": []
+                        }
+                    }
+                ]
+            },
+            "error": Value::Null
+        }),
+    );
+    assert_eq!(
+        read_state(&state_path),
+        std::collections::BTreeMap::from([("sentinel".to_string(), "1.0.0".to_string())])
+    );
+    let environment_entries = fs::read_dir(home.path().join("data").join("environments"))
+        .expect("environments dir")
+        .count();
+    assert_eq!(
+        environment_entries, 0,
+        "`pyra lock` should not reconcile the environment"
+    );
+}
+
+#[test]
 fn lock_regenerates_stale_lock() {
     let home = temp_env_root();
     let project_root = home.path().join("workspace").join("sample-lock-stale");
@@ -933,16 +1063,61 @@ python = "3.13.12"
         .args(["--json", "doctor"])
         .output()
         .expect("doctor json output");
-    assert!(
-        output.status.success(),
-        "doctor should report warnings, not fail"
+    let project_id = project_id_for(&project_root);
+    let metadata_path = home
+        .path()
+        .join("data")
+        .join("environments")
+        .join(&project_id)
+        .join("metadata.json");
+    assert_json_contract(
+        &output,
+        json!({
+            "status": "warn",
+            "exit": {
+                "code": 0,
+                "category": "success"
+            },
+            "output": {
+                "blocks": [
+                    {
+                        "type": "message",
+                        "value": {
+                            "tone": "warn",
+                            "summary": format!("Found 2 issue(s) in `{project_id}`."),
+                            "detail": "Run `pyra sync` or `pyra lock` based on the findings below.",
+                            "hint": Value::Null,
+                            "verbose": []
+                        }
+                    },
+                    {
+                        "type": "message",
+                        "value": {
+                            "tone": "warn",
+                            "summary": "`pylock.toml` could not be parsed.",
+                            "detail": "The lock file exists but is invalid for current lock semantics.",
+                            "hint": "Run `pyra lock` to regenerate `pylock.toml`.",
+                            "verbose": []
+                        }
+                    },
+                    {
+                        "type": "message",
+                        "value": {
+                            "tone": "warn",
+                            "summary": "Centralized environment metadata is missing.",
+                            "detail": format!(
+                                "No environment record exists at `{}` for this project.",
+                                metadata_path.display()
+                            ),
+                            "hint": "Run `pyra sync` to (re)build the centralized environment.",
+                            "verbose": []
+                        }
+                    }
+                ]
+            },
+            "error": Value::Null
+        }),
     );
-    assert!(output.stderr.is_empty(), "json mode should not emit stderr");
-
-    let stdout = String::from_utf8(output.stdout).expect("stdout utf-8");
-    assert!(stdout.contains("\"status\": \"warn\""));
-    assert!(stdout.contains("pylock.toml"));
-    assert!(stdout.contains("stale"));
 
     let current_lock = fs::read_to_string(&lock_path).expect("pylock");
     assert_eq!(current_lock, stale_lock);
@@ -1122,15 +1297,46 @@ python = "3.13.12"
         .args(["--json", "outdated"])
         .output()
         .expect("outdated json output");
-    assert!(
-        output.status.success(),
-        "outdated should succeed in json mode"
+    let project_id = project_id_for(&project_root);
+    assert_json_contract(
+        &output,
+        json!({
+            "status": "warn",
+            "exit": {
+                "code": 0,
+                "category": "success"
+            },
+            "output": {
+                "blocks": [
+                    {
+                        "type": "message",
+                        "value": {
+                            "tone": "warn",
+                            "summary": format!("Found 1 outdated package(s) in `{project_id}`."),
+                            "detail": "Newer versions are available while preserving the current dependency intent.",
+                            "hint": Value::Null,
+                            "verbose": []
+                        }
+                    },
+                    {
+                        "type": "list",
+                        "value": {
+                            "heading": "Outdated packages",
+                            "items": [
+                                {
+                                    "label": "shared: 1.5.0 -> 2.0.0",
+                                    "detail": "declared as shared>=1,<3",
+                                    "verbose": []
+                                }
+                            ],
+                            "empty_message": Value::Null
+                        }
+                    }
+                ]
+            },
+            "error": Value::Null
+        }),
     );
-    assert!(output.stderr.is_empty(), "json mode should not emit stderr");
-
-    let stdout = String::from_utf8(output.stdout).expect("stdout utf-8");
-    assert!(stdout.contains("\"status\": \"warn\""));
-    assert!(stdout.contains("shared: 1.5.0 -> 2.0.0"));
 
     let pyproject_after = fs::read_to_string(&pyproject_path).expect("pyproject");
     let lock_after = fs::read_to_string(&lock_path).expect("pylock");
@@ -1278,6 +1484,100 @@ python = "3.13.12"
         read_state(&state_path),
         std::collections::BTreeMap::from([("sentinel".to_string(), "1.0.0".to_string())])
     );
+}
+
+#[test]
+fn update_dry_run_json_contract_snapshot_for_planned_lock_changes() {
+    let home = temp_env_root();
+    let initial_index = start_fixture_index();
+    let update_index = start_conflict_fixture_index();
+    let project_root = home.path().join("workspace").join("sample-update-json");
+    fs::create_dir_all(&project_root).expect("project root");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        r#"[project]
+name = "sample-update-json"
+version = "0.1.0"
+requires-python = "==3.13.*"
+dependencies = ["shared>=1,<3"]
+
+[tool.pyra]
+python = "3.13.12"
+"#,
+    )
+    .expect("pyproject");
+
+    seed_managed_install(&home, "3.13.12").expect("managed install");
+    let state_path = home.path().join("installer-state.json");
+    fs::write(
+        &state_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "sentinel": "1.0.0"
+        }))
+        .expect("state json"),
+    )
+    .expect("state");
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .env("PYRA_INDEX_URL", &initial_index.base_url)
+        .args(["lock"])
+        .assert()
+        .success();
+
+    let lock_path = project_root.join("pylock.toml");
+    let lock_before = fs::read_to_string(&lock_path).expect("pylock");
+
+    let output = base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .env("PYRA_INDEX_URL", &update_index.base_url)
+        .args(["--json", "update", "--dry-run"])
+        .output()
+        .expect("update json output");
+
+    let project_id = project_id_for(&project_root);
+    assert_json_contract(
+        &output,
+        json!({
+            "status": "warn",
+            "exit": {
+                "code": 0,
+                "category": "success"
+            },
+            "output": {
+                "blocks": [
+                    {
+                        "type": "message",
+                        "value": {
+                            "tone": "warn",
+                            "summary": format!(
+                                "Dry run: `pyra update` would change 1 package(s) in `{project_id}`."
+                            ),
+                            "detail": "Resolved latest versions allowed by current specifiers, but left `pylock.toml` unchanged.",
+                            "hint": "This command only refreshes lock state. Use `pyra add`/`pyra remove` to change declared dependency intent.",
+                            "verbose": []
+                        }
+                    },
+                    {
+                        "type": "list",
+                        "value": {
+                            "heading": "Planned lock changes",
+                            "items": [
+                                {
+                                    "label": "shared: 1.5.0 -> 2.0.0",
+                                    "detail": "updated",
+                                    "verbose": []
+                                }
+                            ],
+                            "empty_message": Value::Null
+                        }
+                    }
+                ]
+            },
+            "error": Value::Null
+        }),
+    );
+    assert_eq!(fs::read_to_string(&lock_path).expect("pylock"), lock_before);
 }
 
 #[test]
@@ -1851,6 +2151,63 @@ python = "3.13.12"
 }
 
 #[test]
+fn add_json_contract_snapshot_for_base_dependency_mutation() {
+    let home = temp_env_root();
+    let index = start_fixture_index();
+    let project_root = home.path().join("workspace").join("sample-add-json");
+    fs::create_dir_all(&project_root).expect("project root");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        r#"[project]
+name = "sample-add-json"
+version = "0.1.0"
+requires-python = "==3.13.*"
+dependencies = ["attrs==25.1.0"]
+
+[tool.pyra]
+python = "3.13.12"
+"#,
+    )
+    .expect("pyproject");
+
+    seed_managed_install(&home, "3.13.12").expect("managed install");
+    let state_path = home.path().join("installer-state.json");
+
+    let output = base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .env("PYRA_INDEX_URL", &index.base_url)
+        .args(["--json", "add", "httpx==0.27.0"])
+        .output()
+        .expect("add json output");
+
+    assert_json_contract(
+        &output,
+        json!({
+            "status": "success",
+            "exit": {
+                "code": 0,
+                "category": "success"
+            },
+            "output": {
+                "blocks": [
+                    {
+                        "type": "message",
+                        "value": {
+                            "tone": "success",
+                            "summary": "Added `httpx==0.27.0` to `[project].dependencies`.",
+                            "detail": "Updated `pyproject.toml`, refreshed `pylock.toml`, and reconciled the centralized environment.",
+                            "hint": Value::Null,
+                            "verbose": []
+                        }
+                    }
+                ]
+            },
+            "error": Value::Null
+        }),
+    );
+}
+
+#[test]
 fn add_resolves_click_fixture_end_to_end() {
     let home = temp_env_root();
     let index = start_fixture_index();
@@ -2237,6 +2594,63 @@ python = "3.13.12"
 }
 
 #[test]
+fn remove_json_contract_snapshot_for_base_dependency_mutation() {
+    let home = temp_env_root();
+    let index = start_fixture_index();
+    let project_root = home.path().join("workspace").join("sample-remove-json");
+    fs::create_dir_all(&project_root).expect("project root");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        r#"[project]
+name = "sample-remove-json"
+version = "0.1.0"
+requires-python = "==3.13.*"
+dependencies = ["attrs==25.1.0", "httpx==0.27.0"]
+
+[tool.pyra]
+python = "3.13.12"
+"#,
+    )
+    .expect("pyproject");
+
+    seed_managed_install(&home, "3.13.12").expect("managed install");
+    let state_path = home.path().join("installer-state.json");
+
+    let output = base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .env("PYRA_INDEX_URL", &index.base_url)
+        .args(["--json", "remove", "httpx"])
+        .output()
+        .expect("remove json output");
+
+    assert_json_contract(
+        &output,
+        json!({
+            "status": "success",
+            "exit": {
+                "code": 0,
+                "category": "success"
+            },
+            "output": {
+                "blocks": [
+                    {
+                        "type": "message",
+                        "value": {
+                            "tone": "success",
+                            "summary": "Removed `httpx` from `[project].dependencies`.",
+                            "detail": "Updated `pyproject.toml`, refreshed `pylock.toml`, and reconciled the centralized environment.",
+                            "hint": Value::Null,
+                            "verbose": []
+                        }
+                    }
+                ]
+            },
+            "error": Value::Null
+        }),
+    );
+}
+
+#[test]
 fn remove_updates_dependency_group_in_pyproject_only() {
     let home = temp_env_root();
     let index = start_fixture_index();
@@ -2608,6 +3022,48 @@ fn fake_python_install_targets(log_path: &Path) -> Result<Vec<String>, Box<dyn s
 
 fn read_state(path: &Path) -> std::collections::BTreeMap<String, String> {
     serde_json::from_slice(&fs::read(path).expect("state")).expect("state json")
+}
+
+fn assert_json_contract(output: &std::process::Output, expected: Value) {
+    assert!(
+        output.status.success(),
+        "command should complete and return machine-readable output"
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "json mode should not emit stderr on successful command paths"
+    );
+
+    let stdout = String::from_utf8(output.stdout.clone()).expect("stdout utf-8");
+    let mut actual: Value = serde_json::from_str(&stdout).expect("json envelope");
+    let mut expected = expected;
+    strip_verbose_lines(&mut actual);
+    strip_verbose_lines(&mut expected);
+    assert_eq!(actual, expected);
+}
+
+fn strip_verbose_lines(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            if let Some(verbose) = map.get_mut("verbose") {
+                *verbose = json!([]);
+            }
+            for child in map.values_mut() {
+                strip_verbose_lines(child);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                strip_verbose_lines(item);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
+}
+
+fn project_id_for(project_root: &Path) -> String {
+    let canonical = fs::canonicalize(project_root).expect("canonical project root");
+    format!("{:x}", Sha256::digest(canonical.to_string_lossy().as_bytes()))
 }
 
 #[cfg(unix)]
