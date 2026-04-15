@@ -95,6 +95,33 @@ pub struct RunProjectOutcome {
     pub exit_code: i32,
 }
 
+/// Request to generate or refresh `pylock.toml` without reconciling the
+/// centralized environment.
+#[derive(Debug, Clone, Default, Eq, PartialEq)]
+pub struct LockProjectRequest {
+    pub lock_targets: Vec<String>,
+}
+
+/// Freshness-aware status for one explicit `pyra lock` execution.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum LockProjectStatus {
+    ReusedFresh,
+    GeneratedMissing,
+    RegeneratedStale,
+}
+
+/// Outcome for `pyra lock`.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct LockProjectOutcome {
+    pub project_root: Utf8PathBuf,
+    pub pyproject_path: Utf8PathBuf,
+    pub pylock_path: Utf8PathBuf,
+    pub project_id: String,
+    pub python_version: String,
+    pub lock_targets: Vec<String>,
+    pub status: LockProjectStatus,
+}
+
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
 pub struct SyncProjectRequest {
     pub selection: SyncSelectionRequest,
@@ -251,6 +278,31 @@ impl ProjectService {
         })
     }
 
+    pub async fn lock(
+        self,
+        context: &AppContext,
+        request: LockProjectRequest,
+    ) -> Result<LockProjectOutcome, ProjectError> {
+        let prepared = prepare_lock_context(context, &request.lock_targets)?;
+        let (_, status) = resolve_or_refresh_lock(
+            &prepared.input,
+            &prepared.lock_targets,
+            &prepared.resolver_environments,
+            &prepared.freshness,
+        )
+        .await?;
+
+        Ok(LockProjectOutcome {
+            project_root: prepared.input.project_root.clone(),
+            pyproject_path: prepared.input.pyproject_path.clone(),
+            pylock_path: prepared.input.pylock_path.clone(),
+            project_id: prepared.identity.id,
+            python_version: prepared.installation.version.to_string(),
+            lock_targets: prepared.lock_targets.as_slice().to_vec(),
+            status,
+        })
+    }
+
     pub fn select_latest_installed_python(
         installations: &[InstalledPythonRecord],
     ) -> Result<InstalledPythonRecord, ProjectError> {
@@ -266,85 +318,57 @@ impl ProjectService {
         context: &AppContext,
         request: SyncProjectRequest,
     ) -> Result<SyncProjectOutcome, ProjectError> {
-        let input = ProjectSyncInputLoader.load(context)?;
-        let identity = input.project_identity()?;
-        let installation = selected_installation(context, &input.pinned_python)?;
-        input.validate_selected_interpreter(&installation.version)?;
-        let selection = SyncSelectionResolver.resolve(&input, &request.selection)?;
+        let prepared = prepare_lock_context(context, &request.lock_targets)?;
+        let selection = SyncSelectionResolver.resolve(&prepared.input, &request.selection)?;
         let environment = ProjectEnvironmentStore.ensure(
             context,
-            &identity,
+            &prepared.identity,
             &ProjectPythonSelection {
-                selector: input.pinned_python.clone(),
-                installation: installation.clone(),
+                selector: prepared.input.pinned_python.clone(),
+                installation: prepared.installation.clone(),
             },
         )?;
-        let resolver_environment = resolver_environment(&installation)?;
-        let lock_targets =
-            effective_lock_targets(&input, &installation.target_triple, &request.lock_targets)?;
-        let resolver_environments =
-            resolver_environments_for_targets(&installation.version.to_string(), &lock_targets)?;
-        let index_url = std::env::var("PYRA_INDEX_URL")
-            .unwrap_or_else(|_| "https://pypi.org/simple".to_string());
-        let freshness = lock_freshness(
-            &input,
-            &resolver_environment,
-            &index_url,
-            resolution_strategy(&lock_targets),
-        );
-        let (lock, lock_refreshed) = match request.lock_mode {
+        let (lock, lock_status) = match request.lock_mode {
             SyncLockMode::WriteIfNeeded => {
-                if input.pylock_path.exists() {
-                    match LockFile::read(&input.pylock_path) {
-                        Ok(lock) if lock.is_fresh_for(&freshness, &lock_targets) => (lock, false),
-                        Ok(_) | Err(ProjectError::ParseLockfile { .. }) => {
-                            // Default sync owns lock freshness and regeneration,
-                            // so an outdated or no-longer-readable lock is
-                            // treated the same as a stale one here.
-                            let lock =
-                                resolve_lock(&input, &resolver_environments, &freshness).await?;
-                            lock.write()?;
-                            (lock, true)
-                        }
-                        Err(error) => return Err(error),
-                    }
-                } else {
-                    let lock = resolve_lock(&input, &resolver_environments, &freshness).await?;
-                    lock.write()?;
-                    (lock, true)
-                }
+                resolve_or_refresh_lock(
+                    &prepared.input,
+                    &prepared.lock_targets,
+                    &prepared.resolver_environments,
+                    &prepared.freshness,
+                )
+                .await?
             }
             SyncLockMode::Locked => {
-                if !input.pylock_path.exists() {
+                if !prepared.input.pylock_path.exists() {
                     return Err(ProjectError::MissingLockfileForLockedSync {
-                        path: input.pylock_path.to_string(),
+                        path: prepared.input.pylock_path.to_string(),
                     });
                 }
 
-                let lock = LockFile::read(&input.pylock_path)?;
-                if !lock.is_fresh_for(&freshness, &lock_targets) {
+                let lock = LockFile::read(&prepared.input.pylock_path)?;
+                if !lock.is_fresh_for(&prepared.freshness, &prepared.lock_targets) {
                     return Err(ProjectError::StaleLockfileForLockedSync {
-                        path: input.pylock_path.to_string(),
+                        path: prepared.input.pylock_path.to_string(),
                     });
                 }
 
-                (lock, false)
+                (lock, LockProjectStatus::ReusedFresh)
             }
             SyncLockMode::Frozen => {
-                if !input.pylock_path.exists() {
+                if !prepared.input.pylock_path.exists() {
                     return Err(ProjectError::MissingLockfileForFrozenSync {
-                        path: input.pylock_path.to_string(),
+                        path: prepared.input.pylock_path.to_string(),
                     });
                 }
 
-                let lock = LockFile::read(&input.pylock_path)?;
-                if !lock.is_fresh_for(&freshness, &lock_targets) {
+                let lock = LockFile::read(&prepared.input.pylock_path)?;
+                if !lock.is_fresh_for(&prepared.freshness, &prepared.lock_targets) {
                     return Err(ProjectError::StaleLockfileForFrozenSync {
-                        path: input.pylock_path.to_string(),
+                        path: prepared.input.pylock_path.to_string(),
                     });
                 }
 
-                (lock, false)
+                (lock, LockProjectStatus::ReusedFresh)
             }
         };
 
@@ -355,8 +379,8 @@ impl ProjectService {
         let lock_selection = LockSelection {
             groups: selected_groups.clone(),
             extras: selection.extras.clone(),
-            python_full_version: installation.version.to_string(),
-            target_triple: installation.target_triple.clone(),
+            python_full_version: prepared.installation.version.to_string(),
+            target_triple: prepared.installation.target_triple.clone(),
         };
         let selected_packages = ReconciliationPlan::for_selection(&lock.packages, &lock_selection);
         let installed_packages =
@@ -369,35 +393,104 @@ impl ProjectService {
             &selected_packages,
             &installed_packages,
             &protected_packages,
-            &input.project_name,
-            input.build_system_present,
+            &prepared.input.project_name,
+            prepared.input.build_system_present,
         );
         let applied = EnvironmentInstaller
             .apply(
                 &context.paths,
                 &environment.interpreter_path,
-                &input.project_root,
-                &input.project_name,
-                input.build_system_present,
+                &prepared.input.project_root,
+                &prepared.input.project_name,
+                prepared.input.build_system_present,
                 &plan,
                 &selected_packages,
             )
             .await?;
 
         Ok(SyncProjectOutcome {
-            project_root: input.project_root,
-            pyproject_path: input.pyproject_path,
-            pylock_path: input.pylock_path,
-            project_id: identity.id,
-            python_version: installation.version.to_string(),
-            lock_refreshed,
+            project_root: prepared.input.project_root,
+            pyproject_path: prepared.input.pyproject_path,
+            pylock_path: prepared.input.pylock_path,
+            project_id: prepared.identity.id,
+            python_version: prepared.installation.version.to_string(),
+            lock_refreshed: lock_status != LockProjectStatus::ReusedFresh,
             selected_groups: selected_groups.into_iter().collect(),
             selected_extras: selection.extras.into_iter().collect(),
             installed_packages: applied.installed,
             removed_packages: applied.removed,
-            project_installed: input.build_system_present,
+            project_installed: prepared.input.build_system_present,
         })
     }
+}
+
+struct PreparedLockContext {
+    input: ProjectSyncInput,
+    identity: ProjectIdentity,
+    installation: InstalledPythonRecord,
+    lock_targets: LockTargetSet,
+    resolver_environments: Vec<ResolverEnvironment>,
+    freshness: LockFreshness,
+}
+
+fn prepare_lock_context(
+    context: &AppContext,
+    override_targets: &[String],
+) -> Result<PreparedLockContext, ProjectError> {
+    let input = ProjectSyncInputLoader.load(context)?;
+    let identity = input.project_identity()?;
+    let installation = selected_installation(context, &input.pinned_python)?;
+    input.validate_selected_interpreter(&installation.version)?;
+    let resolver_environment = resolver_environment(&installation)?;
+    let lock_targets =
+        effective_lock_targets(&input, &installation.target_triple, override_targets)?;
+    let resolver_environments =
+        resolver_environments_for_targets(&installation.version.to_string(), &lock_targets)?;
+    let index_url =
+        std::env::var("PYRA_INDEX_URL").unwrap_or_else(|_| "https://pypi.org/simple".to_string());
+    let freshness = lock_freshness(
+        &input,
+        &resolver_environment,
+        &index_url,
+        resolution_strategy(&lock_targets),
+    );
+
+    Ok(PreparedLockContext {
+        input,
+        identity,
+        installation,
+        lock_targets,
+        resolver_environments,
+        freshness,
+    })
+}
+
+async fn resolve_or_refresh_lock(
+    input: &ProjectSyncInput,
+    lock_targets: &LockTargetSet,
+    resolver_environments: &[ResolverEnvironment],
+    freshness: &LockFreshness,
+) -> Result<(LockFile, LockProjectStatus), ProjectError> {
+    if input.pylock_path.exists() {
+        match LockFile::read(&input.pylock_path) {
+            Ok(lock) if lock.is_fresh_for(freshness, lock_targets) => {
+                return Ok((lock, LockProjectStatus::ReusedFresh));
+            }
+            Ok(_) | Err(ProjectError::ParseLockfile { .. }) => {
+                // Default lock generation owns freshness and regeneration, so
+                // stale and unreadable lockfiles are regenerated via the same
+                // deterministic resolve->write path.
+                let lock = resolve_lock(input, resolver_environments, freshness).await?;
+                lock.write()?;
+                return Ok((lock, LockProjectStatus::RegeneratedStale));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    let lock = resolve_lock(input, resolver_environments, freshness).await?;
+    lock.write()?;
+    Ok((lock, LockProjectStatus::GeneratedMissing))
 }
 
 pub(crate) fn selected_installation(

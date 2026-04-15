@@ -681,6 +681,147 @@ python = "3.13.12"
 }
 
 #[test]
+fn lock_generates_and_reuses_fresh_lock_without_reconciling_environment() {
+    let home = temp_env_root();
+    let project_root = home.path().join("workspace").join("sample-lock-generate");
+    fs::create_dir_all(&project_root).expect("project root");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        r#"[project]
+name = "sample-lock-generate"
+version = "0.1.0"
+requires-python = "==3.13.*"
+dependencies = []
+
+[tool.pyra]
+python = "3.13.12"
+"#,
+    )
+    .expect("pyproject");
+    seed_managed_install(&home, "3.13.12").expect("managed install");
+
+    let state_path = home.path().join("installer-state.json");
+    fs::write(
+        &state_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "sentinel": "1.0.0"
+        }))
+        .expect("state json"),
+    )
+    .expect("state");
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .args(["lock"])
+        .assert()
+        .success()
+        .stdout(contains("Generated `pylock.toml`"));
+
+    let first_lock = fs::read_to_string(project_root.join("pylock.toml")).expect("pylock");
+    let first_state = read_state(&state_path);
+    assert_eq!(
+        first_state,
+        std::collections::BTreeMap::from([("sentinel".to_string(), "1.0.0".to_string())])
+    );
+    let first_environment_entries = fs::read_dir(home.path().join("data").join("environments"))
+        .expect("environments dir")
+        .count();
+    assert_eq!(
+        first_environment_entries, 0,
+        "`pyra lock` should not reconcile the environment"
+    );
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .args(["lock"])
+        .assert()
+        .success()
+        .stdout(contains("Reused fresh `pylock.toml`"));
+
+    let second_lock = fs::read_to_string(project_root.join("pylock.toml")).expect("pylock");
+    assert_eq!(first_lock, second_lock);
+    assert_eq!(
+        read_state(&state_path),
+        std::collections::BTreeMap::from([("sentinel".to_string(), "1.0.0".to_string())])
+    );
+    let second_environment_entries = fs::read_dir(home.path().join("data").join("environments"))
+        .expect("environments dir")
+        .count();
+    assert_eq!(
+        second_environment_entries, 0,
+        "`pyra lock` should not reconcile the environment"
+    );
+}
+
+#[test]
+fn lock_regenerates_stale_lock() {
+    let home = temp_env_root();
+    let project_root = home.path().join("workspace").join("sample-lock-stale");
+    fs::create_dir_all(&project_root).expect("project root");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        r#"[project]
+name = "sample-lock-stale"
+version = "0.1.0"
+requires-python = "==3.13.*"
+dependencies = []
+
+[tool.pyra]
+python = "3.13.12"
+"#,
+    )
+    .expect("pyproject");
+    seed_managed_install(&home, "3.13.12").expect("managed install");
+
+    let state_path = home.path().join("installer-state.json");
+    fs::write(
+        &state_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "sentinel": "1.0.0"
+        }))
+        .expect("state json"),
+    )
+    .expect("state");
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .args(["lock"])
+        .assert()
+        .success();
+    let fresh_lock = fs::read_to_string(project_root.join("pylock.toml")).expect("pylock");
+
+    let stale_lock = fresh_lock.replace(
+        "resolution-strategy = \"environment-scoped-union-v1\"",
+        "resolution-strategy = \"legacy-strategy-v0\"",
+    );
+    assert_ne!(stale_lock, fresh_lock);
+    fs::write(project_root.join("pylock.toml"), stale_lock).expect("stale lock");
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .args(["lock"])
+        .assert()
+        .success()
+        .stdout(contains("Regenerated `pylock.toml`"))
+        .stdout(contains("stale"));
+
+    let regenerated_lock = fs::read_to_string(project_root.join("pylock.toml")).expect("pylock");
+    assert_eq!(regenerated_lock, fresh_lock);
+    assert!(regenerated_lock.contains("resolution-strategy = \"environment-scoped-union-v1\""));
+    assert_eq!(
+        read_state(&state_path),
+        std::collections::BTreeMap::from([("sentinel".to_string(), "1.0.0".to_string())])
+    );
+    let environment_entries = fs::read_dir(home.path().join("data").join("environments"))
+        .expect("environments dir")
+        .count();
+    assert_eq!(
+        environment_entries, 0,
+        "`pyra lock` should not reconcile the environment"
+    );
+}
+
+#[test]
 fn sync_locked_fails_when_lock_is_missing() {
     let home = temp_env_root();
     let project_root = home

@@ -31,6 +31,8 @@ pub enum Command {
     Remove(RemoveArgs),
     /// Reconcile the centralized environment from `pyproject.toml` and `pylock.toml`.
     Sync(SyncArgs),
+    /// Generate or refresh `pylock.toml` without reconciling the environment.
+    Lock(LockArgs),
     /// Execute a project command through the synchronized centralized environment.
     Run(RunArgs),
 }
@@ -143,6 +145,13 @@ pub struct SyncArgs {
     /// Sync only the `dev` dependency group and exclude base dependencies.
     #[arg(long)]
     pub only_dev: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct LockArgs {
+    /// Add one lock-generation target triple for this lock invocation only.
+    #[arg(long = "target")]
+    pub targets: Vec<String>,
 }
 
 #[derive(Debug, Args)]

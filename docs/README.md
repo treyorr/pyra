@@ -23,6 +23,7 @@ Then read the more specific docs that apply to the task:
 
 - `docs/group-semantics.md`
 - `docs/lock-format-notes.md`
+- `docs/lock-command-model.md`
 - `docs/resolution-scope.md`
 - `docs/installer-boundary.md`
 - `docs/add-remove-model.md`
@@ -50,6 +51,8 @@ Then read the more specific docs that apply to the task:
   The end-to-end dependency pipeline for `pyra sync`.
 - `docs/lock-format-notes.md`
   What Pyra means by `pylock.toml` today.
+- `docs/lock-command-model.md`
+  What `pyra lock` guarantees and how lock freshness messaging works.
 - `docs/package-cache-model.md`
   How Pyra reuses verified package artifacts without changing lock authority.
 - `docs/resolution-scope.md`
