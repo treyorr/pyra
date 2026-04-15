@@ -15,6 +15,9 @@ User-facing errors should answer:
 Errors should preserve typed domain meaning for maintainers while keeping the
 default terminal experience concise and actionable.
 
+For automation, major commands should also provide stable machine-readable
+error output and explicit exit code semantics.
+
 ## Current Error Categories
 
 Pyra should continue distinguishing at least:
@@ -80,5 +83,8 @@ continue flowing upward without losing:
 - recoverability
 - context
 - user guidance
+
+They should also remain consistent across commands so CI and team automation can
+depend on them without command-specific exception handling.
 
 That discipline matters more as the dependency pipeline gets deeper.

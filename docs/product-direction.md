@@ -2,9 +2,9 @@
 
 This document exists to keep the project legible as Pyra grows.
 
-Pyra is not just a package installer and not just a runtime experiment.
-It is being built in layers, and each layer must stay coherent with the ones
-below it.
+Pyra is not just a package installer and not just a runtime experiment. It is
+being built in layers, and each layer must stay coherent with the ones below
+it.
 
 ## What Pyra Is Today
 
@@ -31,32 +31,37 @@ Current foundation already exists in code:
 - resolver integration
 - lock writing and lock reuse logic
 - exact reconciliation planning
-- current `sync` pipeline
+- `sync`, `add`, `remove`, `run`, and locked/frozen sync
 
 What is still incomplete is not the basic shape. It is the hardening of that
-shape into something production-grade.
+shape into a safer daily driver and the addition of the next package-manager
+commands that people expect from a uv-class tool.
 
 ## What Pyra Must Become First
 
-Before Pyra expands into bigger runtime territory, it must become a real
-package manager that people can trust.
+Before Pyra expands into broader workflow or runtime territory, it must become
+a package manager that people can trust for day-to-day project work.
 
 That means:
 
-- `sync` must be correct
-- lock reuse must be truthful
-- installs must be hash-verified
-- interpreter constraints must be enforced
-- `add` and `remove` must mutate declared intent and then reuse sync
-- `run` must execute from the synchronized centralized environment
+- `doctor` must explain broken project or environment states clearly
+- `lock` must be explicit rather than only a sync side effect
+- `outdated` must report upgrade opportunities without mutating state
+- `update` must refresh resolved state without changing declared intent
+- command contracts must be stable enough for CI and automation
 
-This is phase 1 and phase 2 work in the execution roadmap.
+The rest of the command surface should be demand-gated.
+
+That means Pyra should defer broader command families until users clearly ask
+for them and the lean core is stable in CI.
+
+This is the next layer of the execution roadmap.
 
 The core idea is:
 
 - Pyra first becomes a strong package and project manager
 - then Pyra becomes a strong developer tool
-- then Pyra becomes a runtime foundation
+- then Pyra becomes a workflow and runtime platform
 
 ## What Pyra Is Not Trying To Be
 
@@ -81,17 +86,21 @@ an ad hoc way.
 
 ## Near-Term Destination
 
-The near-term destination is a production-grade package manager core.
+The near-term destination is a production-grade package manager with strong
+diagnostics and artifact workflows.
 
 That means Pyra should be able to do the important day-to-day work that tools
 like uv, PDM, and Poetry are expected to handle:
 
-- manage a project Python
-- resolve dependencies
-- write and reuse a lock file
-- install from the lock deterministically
-- add and remove dependencies cleanly
-- run project commands through the synchronized environment
+- diagnose project and environment problems
+- manage lock lifecycle explicitly and validate lock health in CI
+- inspect dependency freshness without mutation
+- refresh dependency resolution safely
+- manage dependencies cleanly through declared intent, lock, and sync
+- run project commands through the centralized synchronized environment
+
+Additional command families should be promoted in small tranches after clear
+user demand, not shipped all at once.
 
 This is the point where Pyra becomes a credible default tool for normal Python
 project work.
@@ -106,7 +115,7 @@ That includes:
 - fast installs through caching and parallelism
 - better conflict and error UX
 - more stable resolver behavior on real-world package graphs
-- platform-aware and then multi-environment locks
+- stable task execution and test-running workflows built on the same model
 
 This is the point where Pyra becomes usable across more real teams, CI flows,
 and cross-platform projects.
@@ -118,16 +127,6 @@ environment model, Pyra can grow into the broader runtime direction.
 
 Long-term feature areas include:
 
-### Test Runner
-
-A test runner inspired by pytest and its most useful plugin ecosystem, with a
-strong default UX around:
-
-- concurrency
-- clean output
-- sensible defaults
-- tight integration with the synchronized project environment
-
 ### Tasks And Workflows
 
 Tasks defined in `pyproject.toml`, inspired by tools like taskipy and mise.
@@ -138,6 +137,16 @@ These should not be bolt-on shell wrappers. They should be:
 - interpreter-aware
 - environment-aware
 - easy to run through the same execution model as `pyra run`
+
+### Test Runner
+
+A test runner inspired by pytest and its most useful plugin ecosystem, with a
+strong default UX around:
+
+- concurrency
+- clean output
+- sensible defaults
+- tight integration with the synchronized project environment
 
 ### Notebooks
 
@@ -168,7 +177,7 @@ features.
 The clearer way to think about it is:
 
 1. build a trustworthy package manager core
-2. build a trustworthy execution model on top of it
+2. build a trustworthy execution and diagnostics model on top of it
 3. build developer workflows on top of that
 4. build runtime features on top of that
 
