@@ -10,6 +10,9 @@ use clap::{Args, Parser, Subcommand};
 pub struct Cli {
     #[arg(short, long, global = true, action = clap::ArgAction::Count)]
     pub verbose: u8,
+    /// Emit machine-readable JSON envelopes instead of human-readable terminal output.
+    #[arg(long, global = true)]
+    pub json: bool,
     #[command(subcommand)]
     pub command: Command,
 }

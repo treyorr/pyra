@@ -8,7 +8,7 @@ mod service;
 mod sync;
 
 pub use environment::{ProjectEnvironmentRecord, ProjectPythonSelection};
-pub use error::ProjectError;
+pub use error::{ProjectError, ProjectErrorCategory};
 pub use init::InitProjectOutcome;
 pub use pyproject::{
     DependencyDeclarationScope, LockTargetSet, PyprojectMutationOutcome,

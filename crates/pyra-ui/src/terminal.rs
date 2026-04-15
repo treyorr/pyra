@@ -3,6 +3,7 @@ use std::io::{self, Stderr, Stdout, Write};
 use anstream::AutoStream;
 use pyra_core::Verbosity;
 use pyra_errors::{ErrorKind, UserFacingError};
+use serde::Serialize;
 
 use crate::{Block, ListBlock, Message, Output, Tone};
 
@@ -64,6 +65,15 @@ impl Terminal {
         }
 
         self.stderr.flush()
+    }
+
+    pub fn render_json<T>(&mut self, payload: &T) -> io::Result<()>
+    where
+        T: Serialize,
+    {
+        serde_json::to_writer_pretty(&mut self.stdout, payload).map_err(io::Error::other)?;
+        writeln!(self.stdout)?;
+        self.stdout.flush()
     }
 
     fn render_message(&mut self, message: &Message) -> io::Result<()> {

@@ -1134,6 +1134,8 @@ dependencies = [
  "anstream 0.6.21",
  "pyra-core",
  "pyra-errors",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

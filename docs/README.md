@@ -28,6 +28,7 @@ Then read the more specific docs that apply to the task:
 - `docs/add-remove-model.md`
 - `docs/run-model.md`
 - `docs/error-model.md`
+- `docs/command-contracts.md`
 - `docs/testing-strategy.md`
 - `docs/product-direction.md`
 - `docs/execution-roadmap.md`
@@ -73,6 +74,8 @@ Then read the more specific docs that apply to the task:
 
 - `docs/error-model.md`
   How Pyra should communicate failures.
+- `docs/command-contracts.md`
+  Shared human/JSON command envelopes and exit-code category mapping.
 - `docs/testing-strategy.md`
   How Pyra should test package management behavior safely and deterministically.
 - `docs/execution-roadmap.md`

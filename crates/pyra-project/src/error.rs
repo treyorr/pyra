@@ -804,3 +804,60 @@ impl UserFacingError for ProjectError {
         }
     }
 }
+
+/// Stable command failure categories for project-domain errors.
+///
+/// The CLI maps these categories to command exit-code classes so project
+/// command behavior stays consistent across human and machine-readable modes.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum ProjectErrorCategory {
+    User,
+    System,
+    Internal,
+}
+
+impl From<ErrorKind> for ProjectErrorCategory {
+    fn from(kind: ErrorKind) -> Self {
+        match kind {
+            ErrorKind::User => Self::User,
+            ErrorKind::System => Self::System,
+            ErrorKind::Internal => Self::Internal,
+        }
+    }
+}
+
+impl ProjectError {
+    /// Returns the shared failure category used by CLI exit-code mapping.
+    pub fn category(&self) -> ProjectErrorCategory {
+        ProjectErrorCategory::from(self.report().kind)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn project_error_category_maps_user_errors() {
+        let error = ProjectError::MissingProjectMetadata;
+        assert_eq!(error.category(), ProjectErrorCategory::User);
+    }
+
+    #[test]
+    fn project_error_category_maps_system_errors() {
+        let error = ProjectError::ReadPyproject {
+            path: "pyproject.toml".to_string(),
+            source: io::Error::other("denied"),
+        };
+        assert_eq!(error.category(), ProjectErrorCategory::System);
+    }
+
+    #[test]
+    fn project_error_category_maps_internal_errors() {
+        let error = ProjectError::InvalidManagedPythonVersion {
+            value: "bad".to_string(),
+            detail: "invalid".to_string(),
+        };
+        assert_eq!(error.category(), ProjectErrorCategory::Internal);
+    }
+}

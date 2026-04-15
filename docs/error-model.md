@@ -18,6 +18,15 @@ default terminal experience concise and actionable.
 For automation, major commands should also provide stable machine-readable
 error output and explicit exit code semantics.
 
+Current command contract baseline:
+
+- global `--json` emits one stable envelope shape for success, warning, and failure
+- exit category mapping is explicit:
+  - `user` -> `2`
+  - `system` -> `3`
+  - `internal` -> `4`
+  - successful command paths -> `0`
+
 ## Current Error Categories
 
 Pyra should continue distinguishing at least:
