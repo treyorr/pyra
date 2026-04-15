@@ -105,6 +105,26 @@ user demand, not shipped all at once.
 This is the point where Pyra becomes a credible default tool for normal Python
 project work.
 
+## Delivery Model Going Forward
+
+Pyra should continue using milestone-based execution roadmaps with stable task
+IDs, explicit acceptance criteria, and explicit test requirements.
+
+That is not process overhead. It is how Pyra protects architecture while moving
+quickly with coding agents.
+
+The expected sequence for new initiatives is:
+
+1. write an idea brief
+2. generate an execution roadmap
+3. execute one task at a time
+4. verify contract and integration behavior
+5. run release and open-source readiness gates before announcement
+
+Demand-driven expansion remains the rule. New command families should be
+promoted only when real user demand is visible and the current command
+contracts remain stable in CI.
+
 ## Mid-Term Destination
 
 Once the core package-manager behavior is solid, Pyra should become a broader

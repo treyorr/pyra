@@ -36,6 +36,7 @@ Then read the more specific docs that apply to the task:
 - `docs/testing-strategy.md`
 - `docs/product-direction.md`
 - `docs/execution-roadmap.md`
+- `docs/llm-delivery-standard.md`
 
 ## What Each Doc Answers
 
@@ -83,6 +84,14 @@ Then read the more specific docs that apply to the task:
 - `docs/product-direction.md`
   The high-level picture of what Pyra is now, what it must become next, and how
   longer-term runtime features should build on the package-manager foundation.
+- `docs/execution-roadmap.md`
+  The implementation roadmap, milestone order, and stable task IDs for
+  execution planning.
+- `docs/llm-delivery-standard.md`
+  The standard workflow for LLM-driven planning, task execution, and
+  release-readiness gating.
+- `docs/backlog/README.md`
+  Where initiative-specific idea briefs, roadmaps, and status tracking live.
 
 ### Quality and maintainership
 
@@ -92,9 +101,9 @@ Then read the more specific docs that apply to the task:
   Shared human/JSON command envelopes and exit-code category mapping.
 - `docs/testing-strategy.md`
   How Pyra should test package management behavior safely and deterministically.
-- `docs/execution-roadmap.md`
-  The implementation roadmap, milestone order, and stable task IDs for
-  execution planning.
+- `docs/templates/`
+  Reusable templates and prompt packs for idea intake, roadmap generation,
+  task-by-task execution, and launch readiness checks.
 
 ## Documentation Rules
 
