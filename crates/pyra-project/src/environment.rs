@@ -38,6 +38,12 @@ pub struct ProjectEnvironmentRecord {
 pub struct ProjectEnvironmentStore;
 
 impl ProjectEnvironmentStore {
+    /// Reads an existing environment metadata record without creating or
+    /// refreshing environment state.
+    pub fn read(self, metadata_path: &Utf8Path) -> Result<ProjectEnvironmentRecord, ProjectError> {
+        self.read_record(metadata_path)
+    }
+
     pub fn ensure(
         self,
         context: &AppContext,

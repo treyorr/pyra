@@ -1,3 +1,4 @@
+mod doctor;
 mod environment;
 mod error;
 mod execution;
@@ -7,6 +8,7 @@ mod pyproject;
 mod service;
 mod sync;
 
+pub use doctor::{DoctorIssue, DoctorIssueCode, DoctorProjectOutcome};
 pub use environment::{ProjectEnvironmentRecord, ProjectPythonSelection};
 pub use error::{ProjectError, ProjectErrorCategory};
 pub use init::InitProjectOutcome;
@@ -15,10 +17,10 @@ pub use pyproject::{
     add_dependency_requirement, remove_dependency_requirement,
 };
 pub use service::{
-    AddProjectOutcome, AddProjectRequest, InitProjectRequest, InitProjectWithPythonOutcome,
-    LockProjectOutcome, LockProjectRequest, LockProjectStatus, ProjectService,
-    RemoveProjectOutcome, RemoveProjectRequest, RunProjectOutcome, RunProjectRequest,
-    UseProjectPythonOutcome, UseProjectPythonRequest,
+    AddProjectOutcome, AddProjectRequest, DoctorProjectRequest, InitProjectRequest,
+    InitProjectWithPythonOutcome, LockProjectOutcome, LockProjectRequest, LockProjectStatus,
+    ProjectService, RemoveProjectOutcome, RemoveProjectRequest, RunProjectOutcome,
+    RunProjectRequest, UseProjectPythonOutcome, UseProjectPythonRequest,
 };
 pub use service::{SyncLockMode, SyncProjectOutcome, SyncProjectRequest};
 pub use sync::SyncSelectionRequest;

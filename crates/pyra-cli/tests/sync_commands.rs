@@ -822,6 +822,203 @@ python = "3.13.12"
 }
 
 #[test]
+fn doctor_reports_missing_lock_without_mutation() {
+    let home = temp_env_root();
+    let project_root = home
+        .path()
+        .join("workspace")
+        .join("sample-doctor-missing-lock");
+    fs::create_dir_all(&project_root).expect("project root");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        r#"[project]
+name = "sample-doctor-missing-lock"
+version = "0.1.0"
+requires-python = "==3.13.*"
+dependencies = []
+
+[tool.pyra]
+python = "3.13.12"
+"#,
+    )
+    .expect("pyproject");
+    seed_managed_install(&home, "3.13.12").expect("managed install");
+
+    let state_path = home.path().join("installer-state.json");
+    fs::write(
+        &state_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "sentinel": "1.0.0"
+        }))
+        .expect("state json"),
+    )
+    .expect("state");
+
+    let output = base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .args(["doctor"])
+        .output()
+        .expect("doctor output");
+    assert!(
+        output.status.success(),
+        "doctor should report warnings, not fail"
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout utf-8");
+    assert!(stdout.contains("issue(s)"));
+    assert!(stdout.contains("`pylock.toml` is missing."));
+
+    assert!(!project_root.join("pylock.toml").exists());
+    assert_eq!(
+        read_state(&state_path),
+        std::collections::BTreeMap::from([("sentinel".to_string(), "1.0.0".to_string())])
+    );
+    let environment_entries = fs::read_dir(home.path().join("data").join("environments"))
+        .expect("environments dir")
+        .count();
+    assert_eq!(
+        environment_entries, 0,
+        "`pyra doctor` should not reconcile the environment"
+    );
+}
+
+#[test]
+fn doctor_reports_stale_lock_in_json_mode_without_mutation() {
+    let home = temp_env_root();
+    let project_root = home
+        .path()
+        .join("workspace")
+        .join("sample-doctor-stale-lock");
+    fs::create_dir_all(&project_root).expect("project root");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        r#"[project]
+name = "sample-doctor-stale-lock"
+version = "0.1.0"
+requires-python = "==3.13.*"
+dependencies = []
+
+[tool.pyra]
+python = "3.13.12"
+"#,
+    )
+    .expect("pyproject");
+    seed_managed_install(&home, "3.13.12").expect("managed install");
+
+    let state_path = home.path().join("installer-state.json");
+    fs::write(
+        &state_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "sentinel": "1.0.0"
+        }))
+        .expect("state json"),
+    )
+    .expect("state");
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .args(["lock"])
+        .assert()
+        .success();
+
+    let lock_path = project_root.join("pylock.toml");
+    let stale_lock = fs::read_to_string(&lock_path).expect("pylock").replace(
+        "resolution-strategy = \"environment-scoped-union-v1\"",
+        "resolution-strategy = \"legacy-strategy-v0\"",
+    );
+    fs::write(&lock_path, &stale_lock).expect("stale lock");
+
+    let output = base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .args(["--json", "doctor"])
+        .output()
+        .expect("doctor json output");
+    assert!(
+        output.status.success(),
+        "doctor should report warnings, not fail"
+    );
+    assert!(output.stderr.is_empty(), "json mode should not emit stderr");
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout utf-8");
+    assert!(stdout.contains("\"status\": \"warn\""));
+    assert!(stdout.contains("pylock.toml"));
+    assert!(stdout.contains("stale"));
+
+    let current_lock = fs::read_to_string(&lock_path).expect("pylock");
+    assert_eq!(current_lock, stale_lock);
+    assert_eq!(
+        read_state(&state_path),
+        std::collections::BTreeMap::from([("sentinel".to_string(), "1.0.0".to_string())])
+    );
+}
+
+#[test]
+fn doctor_reports_environment_drift_without_mutation() {
+    let home = temp_env_root();
+    let index = start_fixture_index();
+    let project_root = home
+        .path()
+        .join("workspace")
+        .join("sample-doctor-environment-drift");
+    fs::create_dir_all(&project_root).expect("project root");
+    fs::write(
+        project_root.join("pyproject.toml"),
+        r#"[project]
+name = "sample-doctor-environment-drift"
+version = "0.1.0"
+requires-python = "==3.13.*"
+dependencies = ["attrs==25.1.0"]
+
+[tool.pyra]
+python = "3.13.12"
+"#,
+    )
+    .expect("pyproject");
+
+    seed_managed_install(&home, "3.13.12").expect("managed install");
+    let state_path = home.path().join("installer-state.json");
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .env("PYRA_INDEX_URL", &index.base_url)
+        .args(["sync"])
+        .assert()
+        .success();
+
+    let lock_path = project_root.join("pylock.toml");
+    let lock_before = fs::read_to_string(&lock_path).expect("pylock");
+    fs::write(
+        &state_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "attrs": "24.0.0",
+            "orphan": "1.0.0"
+        }))
+        .expect("state json"),
+    )
+    .expect("state");
+
+    base_command(&home, &state_path)
+        .current_dir(&project_root)
+        .env("PYRA_INDEX_URL", &index.base_url)
+        .args(["doctor"])
+        .assert()
+        .success()
+        .stdout(contains(
+            "Centralized environment has drifted from the selected lock state.",
+        ));
+
+    let lock_after = fs::read_to_string(&lock_path).expect("pylock");
+    assert_eq!(lock_before, lock_after);
+    assert_eq!(
+        read_state(&state_path),
+        std::collections::BTreeMap::from([
+            ("attrs".to_string(), "24.0.0".to_string()),
+            ("orphan".to_string(), "1.0.0".to_string()),
+        ])
+    );
+}
+
+#[test]
 fn sync_locked_fails_when_lock_is_missing() {
     let home = temp_env_root();
     let project_root = home

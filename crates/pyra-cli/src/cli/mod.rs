@@ -33,6 +33,8 @@ pub enum Command {
     Sync(SyncArgs),
     /// Generate or refresh `pylock.toml` without reconciling the environment.
     Lock(LockArgs),
+    /// Diagnose project lock and environment health without mutating state.
+    Doctor(DoctorArgs),
     /// Execute a project command through the synchronized centralized environment.
     Run(RunArgs),
 }
@@ -153,6 +155,9 @@ pub struct LockArgs {
     #[arg(long = "target")]
     pub targets: Vec<String>,
 }
+
+#[derive(Debug, Args)]
+pub struct DoctorArgs {}
 
 #[derive(Debug, Args)]
 #[command(trailing_var_arg = true)]

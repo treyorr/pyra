@@ -4,6 +4,7 @@
 //! environment preparation while leaving Python release resolution to the
 //! dedicated Python subsystem.
 
+use std::collections::BTreeSet;
 use std::str::FromStr;
 
 use camino::Utf8PathBuf;
@@ -19,6 +20,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     ProjectError,
+    doctor::{DoctorIssue, DoctorIssueCode, DoctorProjectOutcome},
     environment::{ProjectEnvironmentRecord, ProjectEnvironmentStore, ProjectPythonSelection},
     execution::{ProjectExecutionRequest, ProjectExecutionService},
     identity::{ProjectIdentity, find_project_root},
@@ -121,6 +123,10 @@ pub struct LockProjectOutcome {
     pub lock_targets: Vec<String>,
     pub status: LockProjectStatus,
 }
+
+/// Request to run read-only project diagnostics.
+#[derive(Debug, Clone, Default, Eq, PartialEq)]
+pub struct DoctorProjectRequest;
 
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
 pub struct SyncProjectRequest {
@@ -303,6 +309,228 @@ impl ProjectService {
         })
     }
 
+    pub fn doctor(
+        self,
+        context: &AppContext,
+        _request: DoctorProjectRequest,
+    ) -> Result<DoctorProjectOutcome, ProjectError> {
+        let input = ProjectSyncInputLoader.load(context)?;
+        let identity = input.project_identity()?;
+        let mut issues = Vec::new();
+
+        let installation = match selected_installation(context, &input.pinned_python) {
+            Ok(installation) => {
+                if let Err(error) = input.validate_selected_interpreter(&installation.version) {
+                    match error {
+                        ProjectError::PinnedPythonIncompatibleWithProject {
+                            interpreter,
+                            requires_python,
+                        } => issues.push(doctor_issue(
+                            DoctorIssueCode::InterpreterMismatch,
+                            "Pinned interpreter does not satisfy `[project].requires-python`.",
+                            format!(
+                                "The pinned interpreter is `{interpreter}`, but the project declares `{requires_python}`."
+                            ),
+                            "Update the pin with `pyra use <version>` or adjust `requires-python` in `pyproject.toml`.",
+                        )),
+                        other => return Err(other),
+                    }
+                }
+                Some(installation)
+            }
+            Err(ProjectError::PinnedPythonNotInstalled { selector, .. }) => {
+                issues.push(doctor_issue(
+                    DoctorIssueCode::InterpreterMismatch,
+                    "Pinned interpreter is not installed.",
+                    format!(
+                        "The project pins `{selector}`, but no matching Pyra-managed Python is installed."
+                    ),
+                    format!("Install it with `pyra python install {selector}`."),
+                ));
+                None
+            }
+            Err(error) => return Err(error),
+        };
+
+        let lock = if !input.pylock_path.exists() {
+            issues.push(doctor_issue(
+                DoctorIssueCode::MissingLock,
+                "`pylock.toml` is missing.",
+                "The project has no resolved lock state yet.".to_string(),
+                "Run `pyra lock` (or `pyra sync`) to generate `pylock.toml`.".to_string(),
+            ));
+            None
+        } else {
+            match LockFile::read(&input.pylock_path) {
+                Ok(lock) => {
+                    if let Some(installation) = &installation {
+                        let resolver_environment = resolver_environment(installation)?;
+                        let lock_targets =
+                            effective_lock_targets(&input, &installation.target_triple, &[])?;
+                        let index_url = std::env::var("PYRA_INDEX_URL")
+                            .unwrap_or_else(|_| "https://pypi.org/simple".to_string());
+                        let freshness = lock_freshness(
+                            &input,
+                            &resolver_environment,
+                            &index_url,
+                            resolution_strategy(&lock_targets),
+                        );
+                        if !lock.is_fresh_for(&freshness, &lock_targets) {
+                            issues.push(doctor_issue(
+                                DoctorIssueCode::StaleLock,
+                                "`pylock.toml` is stale for current project inputs.",
+                                "The current lock does not match the active interpreter and/or dependency inputs."
+                                    .to_string(),
+                                "Run `pyra lock` to refresh the lock file.".to_string(),
+                            ));
+                        }
+                    }
+                    Some(lock)
+                }
+                Err(ProjectError::ParseLockfile { .. }) => {
+                    issues.push(doctor_issue(
+                        DoctorIssueCode::StaleLock,
+                        "`pylock.toml` could not be parsed.",
+                        "The lock file exists but is invalid for current lock semantics."
+                            .to_string(),
+                        "Run `pyra lock` to regenerate `pylock.toml`.".to_string(),
+                    ));
+                    None
+                }
+                Err(error) => return Err(error),
+            }
+        };
+
+        let metadata_path = context.paths.project_environment_metadata(&identity.id);
+        let environment = if !metadata_path.exists() {
+            issues.push(doctor_issue(
+                DoctorIssueCode::EnvironmentDrift,
+                "Centralized environment metadata is missing.",
+                format!(
+                    "No environment record exists at `{}` for this project.",
+                    metadata_path
+                ),
+                "Run `pyra sync` to (re)build the centralized environment.".to_string(),
+            ));
+            None
+        } else {
+            match ProjectEnvironmentStore.read(&metadata_path) {
+                Ok(record) => {
+                    if let Some(installation) = &installation {
+                        if record.python_version != installation.version {
+                            issues.push(doctor_issue(
+                                DoctorIssueCode::InterpreterMismatch,
+                                "Environment interpreter does not match the pinned interpreter.",
+                                format!(
+                                    "Environment metadata records `{}`, but the pinned interpreter resolves to `{}`.",
+                                    record.python_version,
+                                    installation.version
+                                ),
+                                "Run `pyra sync` after updating the project pin with `pyra use`."
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                    if !record.environment_path.exists() || !record.interpreter_path.exists() {
+                        issues.push(doctor_issue(
+                            DoctorIssueCode::EnvironmentDrift,
+                            "Centralized environment path is missing.",
+                            format!(
+                                "Expected environment at `{}` with interpreter `{}`.",
+                                record.environment_path, record.interpreter_path
+                            ),
+                            "Run `pyra sync` to rebuild the centralized environment.".to_string(),
+                        ));
+                    }
+                    Some(record)
+                }
+                Err(ProjectError::ReadEnvironmentMetadata { .. })
+                | Err(ProjectError::ParseEnvironmentMetadata { .. }) => {
+                    issues.push(doctor_issue(
+                        DoctorIssueCode::EnvironmentDrift,
+                        "Centralized environment metadata is unreadable.",
+                        format!("Could not read `{metadata_path}`."),
+                        "Run `pyra sync` to refresh environment metadata.".to_string(),
+                    ));
+                    None
+                }
+                Err(error) => return Err(error),
+            }
+        };
+
+        if let (Some(lock), Some(environment), Some(installation)) =
+            (lock.as_ref(), environment.as_ref(), installation.as_ref())
+        {
+            if environment.interpreter_path.exists() {
+                let selection =
+                    SyncSelectionResolver.resolve(&input, &SyncSelectionRequest::default())?;
+                let mut selected_groups = selection.groups.clone();
+                if selection.include_base {
+                    selected_groups.insert("pyra-default".to_string());
+                }
+                let lock_selection = LockSelection {
+                    groups: selected_groups,
+                    extras: selection.extras.clone(),
+                    python_full_version: installation.version.to_string(),
+                    target_triple: installation.target_triple.clone(),
+                };
+                let selected_packages =
+                    ReconciliationPlan::for_selection(&lock.packages, &lock_selection);
+                let installed_packages =
+                    match EnvironmentInstaller.inspect_installed(&environment.interpreter_path) {
+                        Ok(packages) => Some(packages),
+                        Err(ProjectError::InspectEnvironment { .. }) => {
+                            issues.push(doctor_issue(
+                                DoctorIssueCode::EnvironmentDrift,
+                                "Installed package state could not be inspected.",
+                                format!(
+                                    "Pyra could not inspect packages through `{}`.",
+                                    environment.interpreter_path
+                                ),
+                                "Repair the environment with `pyra sync`.".to_string(),
+                            ));
+                            None
+                        }
+                        Err(error) => return Err(error),
+                    };
+                if let Some(installed_packages) = installed_packages {
+                    let protected_packages = ["pip", "setuptools", "wheel"]
+                        .into_iter()
+                        .map(ToString::to_string)
+                        .collect::<BTreeSet<_>>();
+                    let plan = ReconciliationPlan::build(
+                        &selected_packages,
+                        &installed_packages,
+                        &protected_packages,
+                        &input.project_name,
+                        input.build_system_present,
+                    );
+                    if !plan.actions.is_empty() {
+                        let action_count = plan.actions.len();
+                        issues.push(doctor_issue(
+                            DoctorIssueCode::EnvironmentDrift,
+                            "Centralized environment has drifted from the selected lock state.",
+                            format!(
+                                "Reconciling this environment would apply {action_count} install/remove action(s)."
+                            ),
+                            "Run `pyra sync` to reconcile the environment.".to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+
+        Ok(DoctorProjectOutcome {
+            project_root: input.project_root,
+            pyproject_path: input.pyproject_path,
+            pylock_path: input.pylock_path,
+            project_id: identity.id,
+            python_selector: input.pinned_python.to_string(),
+            python_version: installation.map(|record| record.version.to_string()),
+            issues,
+        })
+    }
+
     pub fn select_latest_installed_python(
         installations: &[InstalledPythonRecord],
     ) -> Result<InstalledPythonRecord, ProjectError> {
@@ -421,6 +649,20 @@ impl ProjectService {
             removed_packages: applied.removed,
             project_installed: prepared.input.build_system_present,
         })
+    }
+}
+
+fn doctor_issue(
+    code: DoctorIssueCode,
+    summary: impl Into<String>,
+    detail: impl Into<String>,
+    suggestion: impl Into<String>,
+) -> DoctorIssue {
+    DoctorIssue {
+        code,
+        summary: summary.into(),
+        detail: detail.into(),
+        suggestion: suggestion.into(),
     }
 }
 

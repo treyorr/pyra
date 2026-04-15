@@ -1,4 +1,5 @@
 mod add;
+mod doctor;
 mod init;
 mod lock;
 mod project_python;
@@ -16,7 +17,8 @@ use pyra_ui::Output;
 use thiserror::Error;
 
 use crate::cli::{
-    AddArgs, Command, InitArgs, LockArgs, PythonArgs, RemoveArgs, RunArgs, SyncArgs, UseArgs,
+    AddArgs, Command, DoctorArgs, InitArgs, LockArgs, PythonArgs, RemoveArgs, RunArgs, SyncArgs,
+    UseArgs,
 };
 
 #[derive(Debug, Error)]
@@ -81,6 +83,9 @@ pub async fn execute(
         Command::Lock(args) => execute_lock(args, context)
             .await
             .map(CommandExecution::success),
+        Command::Doctor(args) => execute_doctor(args, context)
+            .await
+            .map(CommandExecution::success),
         Command::Run(args) => execute_run(args, context).await,
     }
 }
@@ -111,6 +116,10 @@ async fn execute_sync(args: SyncArgs, context: &AppContext) -> Result<Output, Co
 
 async fn execute_lock(args: LockArgs, context: &AppContext) -> Result<Output, CommandError> {
     lock::execute(args, context).await
+}
+
+async fn execute_doctor(args: DoctorArgs, context: &AppContext) -> Result<Output, CommandError> {
+    doctor::execute(args, context).await
 }
 
 async fn execute_run(
