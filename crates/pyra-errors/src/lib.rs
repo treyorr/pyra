@@ -1,3 +1,8 @@
+//! Shared typed error and exit-code contract primitives.
+//!
+//! This crate is intentionally small so all higher-level crates can map
+//! user-facing failures onto one stable process-exit contract.
+
 use std::error::Error;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -45,4 +50,52 @@ impl ErrorReport {
 
 pub trait UserFacingError: Error {
     fn report(&self) -> ErrorReport;
+}
+
+/// Stable process exit code for successful command execution.
+pub const EXIT_CODE_SUCCESS: i32 = 0;
+/// Stable process exit code for user/input failures.
+pub const EXIT_CODE_USER: i32 = 2;
+/// Stable process exit code for system/IO failures.
+pub const EXIT_CODE_SYSTEM: i32 = 3;
+/// Stable process exit code for internal invariant failures.
+pub const EXIT_CODE_INTERNAL: i32 = 4;
+/// Fallback process exit code when an external command fails without an
+/// explicit status code.
+pub const EXIT_CODE_EXTERNAL_FALLBACK: i32 = 1;
+
+/// Maps typed failure kinds onto the shared non-success process exit codes.
+pub const fn exit_code_from_error_kind(kind: ErrorKind) -> i32 {
+    match kind {
+        ErrorKind::User => EXIT_CODE_USER,
+        ErrorKind::System => EXIT_CODE_SYSTEM,
+        ErrorKind::Internal => EXIT_CODE_INTERNAL,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exit_code_constants_are_stable() {
+        assert_eq!(EXIT_CODE_SUCCESS, 0);
+        assert_eq!(EXIT_CODE_USER, 2);
+        assert_eq!(EXIT_CODE_SYSTEM, 3);
+        assert_eq!(EXIT_CODE_INTERNAL, 4);
+        assert_eq!(EXIT_CODE_EXTERNAL_FALLBACK, 1);
+    }
+
+    #[test]
+    fn error_kind_mapping_is_stable() {
+        assert_eq!(exit_code_from_error_kind(ErrorKind::User), EXIT_CODE_USER);
+        assert_eq!(
+            exit_code_from_error_kind(ErrorKind::System),
+            EXIT_CODE_SYSTEM
+        );
+        assert_eq!(
+            exit_code_from_error_kind(ErrorKind::Internal),
+            EXIT_CODE_INTERNAL
+        );
+    }
 }
