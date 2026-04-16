@@ -945,8 +945,7 @@ mod tests {
                 "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
             ),
         );
-        sphinx.marker =
-            LockMarker::from_clauses(vec![LockMarkerClause::dependency_group("docs")]);
+        sphinx.marker = LockMarker::from_clauses(vec![LockMarkerClause::dependency_group("docs")]);
 
         let mut rich_extra = package_with_named_artifact(
             "rich-extra",

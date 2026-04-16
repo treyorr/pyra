@@ -3203,7 +3203,10 @@ fn strip_verbose_lines(value: &mut Value) {
 
 fn project_id_for(project_root: &Path) -> String {
     let canonical = fs::canonicalize(project_root).expect("canonical project root");
-    format!("{:x}", Sha256::digest(canonical.to_string_lossy().as_bytes()))
+    format!(
+        "{:x}",
+        Sha256::digest(canonical.to_string_lossy().as_bytes())
+    )
 }
 
 #[cfg(unix)]

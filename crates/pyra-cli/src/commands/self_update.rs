@@ -4,9 +4,9 @@
 //! overlap with `pyra update`, which remains the lock refresh command for
 //! project dependencies.
 
+use ::self_update::{Status, backends::github::Update};
 use pyra_core::AppContext;
 use pyra_ui::{Block, Message, Output};
-use ::self_update::{Status, backends::github::Update};
 
 use crate::cli::{SelfArgs, SelfCommand, SelfUpdateArgs};
 use crate::commands::{CommandError, SelfUpdateError};
