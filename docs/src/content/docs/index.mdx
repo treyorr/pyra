@@ -1,0 +1,92 @@
+---
+title: pyra
+description: Deterministic Python tooling with one pipeline for versions, deps, environments, and execution.
+template: splash
+hero:
+  tagline: One pipeline for Python versions, dependencies, environments, and execution.
+  image:
+    file: ../../assets/icon.png
+  actions:
+    - text: Get Started
+      link: /getting-started/
+      icon: right-arrow
+      variant: primary
+    - text: View on GitHub
+      link: https://github.com/treyorr/pyra
+      icon: external
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## What is Pyra?
+
+Pyra is a Python package and project manager built in Rust. It handles Python version management, dependency resolution, environment reconciliation, and script execution through a single tool with a single pipeline.
+
+Pyra uses `pyproject.toml` as the source of declared intent and `pylock.toml` as the source of realized install state. Environments are centralized, deterministic, and exactly reconciled from the lock.
+
+The goal is a tool that feels simple, fast, and predictable — more like Bun than like the traditional fragmented Python tooling ecosystem.
+
+## Install
+
+```bash
+curl -fsSL https://tlo3.com/pyra-install.sh | sh
+```
+
+The install script downloads the correct GitHub Release archive for your
+machine, verifies the published checksum, and installs `pyra` onto your `PATH`.
+
+After that, keeping Pyra current is one command:
+
+```bash
+pyra self update
+```
+
+## Why Pyra?
+
+<CardGrid>
+  <Card title="Managed Python" icon="seti:python">
+    Install, pin, and manage Python versions from `python-build-standalone`. No system Python required.
+  </Card>
+  <Card title="Deterministic sync" icon="approve-check">
+    One pipeline: read inputs &rarr; check freshness &rarr; resolve &rarr; lock &rarr; reconcile. Every sync produces an exact environment.
+  </Card>
+  <Card title="Standards-first" icon="open-book">
+    `pyproject.toml` for project metadata. PEP 751-shaped `pylock.toml`. PEP 508 requirements. PEP 440 versions.
+  </Card>
+  <Card title="Centralized environments" icon="setting">
+    Environments live outside the project tree. Clean checkouts. Stable identity. No `.venv` to manage.
+  </Card>
+</CardGrid>
+
+## Quick flow
+
+```bash
+pyra python install 3.13
+pyra init --python 3.13
+pyra add requests
+pyra sync
+pyra run main.py
+```
+
+## Core capabilities
+
+- **Python management** — install, list, search, uninstall, and pin Python versions
+- **Project initialization** — scaffold `pyproject.toml` and `pylock.toml`
+- **Dependency management** — add, remove, and update dependencies across base, groups, and extras
+- **Lock lifecycle** — generate, refresh, and validate `pylock.toml`
+- **Environment sync** — exact reconciliation from lock to centralized environment
+- **Execution** — run scripts and commands through the synchronized environment
+- **Diagnostics** — `doctor` for health checks, `outdated` for upgrade reporting
+- **Machine-readable output** — `--json` envelope for CI and automation
+
+## Current limitations
+
+Pyra is in active development. Honest summary of the current state:
+
+- Lock files target the current platform and interpreter only — not universal cross-platform locks
+- Resolution solves one union of all groups and extras, which can reject independently valid but mutually incompatible scopes
+- The installer uses `pip` behind a strict boundary (no-deps, no resolution)
+- `add` works but network operations can take 20+ seconds in some cases
+- Verbosity levels plateau after `-v`
+
+See [Status](/status/) for the full verification matrix and [Roadmap](/roadmap/) for what comes next.

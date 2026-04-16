@@ -16,6 +16,7 @@ pyra-errors = { path = "../pyra-errors" }
 pyra-project = { path = "../pyra-project" }
 pyra-python = { path = "../pyra-python" }
 pyra-ui = { path = "../pyra-ui" }
+self_update.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 

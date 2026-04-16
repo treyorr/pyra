@@ -27,6 +27,7 @@ Then read the more specific docs that apply to the task:
 - `docs/doctor-model.md`
 - `docs/outdated-model.md`
 - `docs/update-model.md`
+- `docs/self-update-model.md`
 - `docs/resolution-scope.md`
 - `docs/installer-boundary.md`
 - `docs/add-remove-model.md`
@@ -65,6 +66,9 @@ Then read the more specific docs that apply to the task:
 - `docs/update-model.md`
   What `pyra update` refreshes in lock state, how dry-run behaves, and why it
   does not mutate declared dependency intent.
+- `docs/self-update-model.md`
+  What `pyra self update` owns, how it maps onto GitHub Releases, and why it
+  remains separate from project dependency update semantics.
 - `docs/package-cache-model.md`
   How Pyra reuses verified package artifacts without changing lock authority.
 - `docs/resolution-scope.md`

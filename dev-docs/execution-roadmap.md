@@ -53,7 +53,7 @@ signals make them unavoidable:
 - package release surface (`build`, `publish`) unless current target users are package publishers
 - policy command surface (allowlists, direct URL policy, hash strict profiles)
 - monorepo/workspace strategy implementation
-- self-update
+- self-update beyond the simple `pyra self update` binary updater
 
 These are valuable, but they are not required for 99% of everyday Python app
 development workflows.

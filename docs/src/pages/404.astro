@@ -1,0 +1,83 @@
+---
+---
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>404 | pyra docs</title>
+  </head>
+  <body>
+    <main class="not-found">
+      <p class="eyebrow">404</p>
+      <h1>Page not found</h1>
+      <p>
+        The page you asked for does not exist, or it may have moved while the
+        docs are still being reorganized.
+      </p>
+      <a href="/">Return to docs home</a>
+    </main>
+  </body>
+</html>
+
+<style>
+  :root {
+    color-scheme: dark;
+    font-family:
+      "IBM Plex Sans",
+      "Avenir Next",
+      sans-serif;
+  }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background:
+      radial-gradient(circle at top, rgba(120, 186, 146, 0.18), transparent 45%),
+      linear-gradient(180deg, #08110d 0%, #0d1712 100%);
+    color: #e5f0e9;
+  }
+
+  .not-found {
+    box-sizing: border-box;
+    max-width: 40rem;
+    margin: 0 auto;
+    padding: 6rem 1.5rem;
+  }
+
+  .eyebrow {
+    margin: 0 0 0.5rem;
+    font-size: 0.95rem;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: #7fc49c;
+  }
+
+  h1 {
+    margin: 0 0 1rem;
+    font-size: clamp(2.5rem, 7vw, 4.5rem);
+    line-height: 0.95;
+  }
+
+  p {
+    margin: 0 0 1.25rem;
+    font-size: 1.05rem;
+    line-height: 1.7;
+    color: #bfd1c6;
+  }
+
+  a {
+    display: inline-block;
+    color: #08110d;
+    background: #7fc49c;
+    padding: 0.8rem 1rem;
+    border-radius: 999px;
+    font-weight: 700;
+    text-decoration: none;
+  }
+
+  a:hover {
+    background: #9bdbb6;
+  }
+</style>

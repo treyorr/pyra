@@ -86,6 +86,26 @@ fn json_failure_envelope_snapshot_for_user_error() {
     assert_eq!(stdout, expected);
 }
 
+#[test]
+fn self_update_help_is_available() {
+    let home = temp_env_root();
+    let output = base_command(&home)
+        .args(["self", "update", "--help"])
+        .output()
+        .expect("self update help");
+
+    assert!(output.status.success(), "help should succeed");
+    let stdout = String::from_utf8(output.stdout).expect("stdout utf-8");
+    assert!(
+        stdout.contains("Update the installed Pyra binary from GitHub Releases"),
+        "help output should describe the self update command"
+    );
+    assert!(
+        stdout.contains("Usage: pyra self update"),
+        "help output should expose the command usage"
+    );
+}
+
 fn temp_env_root() -> TempDir {
     tempfile::tempdir().expect("temporary directory")
 }

@@ -1,0 +1,30 @@
+name: Feature request
+description: Suggest a new capability or workflow improvement for Pyra.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: What workflow is painful or missing today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed outcome
+      description: What should Pyra do instead?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What are you doing today as a workaround?
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Links, examples, prior art, or constraints.

@@ -1,0 +1,144 @@
+---
+title: Project Structure
+description: Crate layout, module responsibilities, and command flow in the Pyra workspace.
+---
+
+import { FileTree } from '@astrojs/starlight/components';
+
+Pyra is a Rust workspace with small, focused crates. Each crate has a clear responsibility boundary.
+
+## Crate layout
+
+<FileTree>
+
+- pyra-project/
+  - Cargo.toml **workspace root**
+  - crates/
+    - pyra-cli/ CLI entrypoint, clap parsing, command dispatch
+    - pyra-core/ shared context, paths, config, verbosity
+    - pyra-errors/ shared error abstractions
+    - pyra-project/ project logic, sync, lock, installer, environment
+    - pyra-python/ Python version management
+    - pyra-resolver/ dependency resolution (PubGrub-based)
+    - pyra-ui/ terminal output, styles, JSON envelopes
+  - dev-docs/ internal architecture docs
+
+</FileTree>
+
+## Crate responsibilities
+
+### `pyra-cli`
+
+The application entrypoint. Owns:
+
+- clap struct/enum definitions (argument parsing)
+- Command dispatch — routing parsed input to domain services
+- Top-level error handling and exit code mapping
+- Output mode selection (human vs JSON)
+
+Key modules:
+- `cli/` — clap definitions (`Cli`, `Command`, argument structs)
+- `commands/` — individual command handlers (one per command)
+- `lib.rs` — entrypoint composition, error rendering, exit code normalization
+
+### `pyra-core`
+
+Shared runtime context and infrastructure. Owns:
+
+- `AppContext` — runtime paths, verbosity, config
+- `paths.rs` — centralized path resolution for Python store, environments, cache
+- `config.rs` — config loading
+- `verbosity.rs` — verbosity level model
+- `error.rs` — core-level errors
+
+All path resolution is centralized here. Other crates never build Pyra-managed paths independently.
+
+### `pyra-errors`
+
+Shared error abstractions. Owns:
+
+- `ErrorReport` — structured error with summary, detail, and suggestion
+- `ErrorKind` — user / system / internal categorization
+- `UserFacingError` trait — contract for domain errors to produce user-facing reports
+
+### `pyra-project`
+
+The largest domain crate. Owns the full project lifecycle:
+
+- `pyproject.rs` — parsing and manipulation of `pyproject.toml`
+- `environment.rs` — centralized environment management
+- `identity.rs` — stable project identity from canonical root
+- `init.rs` — project initialization
+- `service.rs` — command-level orchestration (sync, add, remove, run, etc.)
+- `doctor.rs` — health diagnostics
+- `outdated.rs` — upgrade reporting
+- `update.rs` — lock refresh
+- `execution.rs` — `pyra run` execution logic
+- `error.rs` — rich domain errors with typed categories
+- `sync/` — the sync subsystem:
+  - `lockfile.rs` — lock reading, writing, and freshness
+  - `install.rs` — environment reconciliation and artifact management
+  - `selection.rs` — group/extra selection logic
+  - `project_input.rs` — dependency input normalization
+  - `marker.rs` — marker evaluation
+
+### `pyra-python`
+
+Python version management. Owns:
+
+- `service.rs` — install, uninstall, list, search
+- `client.rs` — HTTP client for python-build-standalone
+- `store.rs` — local Python installation storage
+- `version.rs` — version parsing and matching
+- `host.rs` — host platform detection
+- `model.rs` — Python version model
+
+### `pyra-resolver`
+
+Dependency resolution. Owns:
+
+- `provider.rs` — PubGrub dependency provider implementation
+- `simple.rs` — PyPI Simple API client
+- `version.rs` — version compatibility and range logic
+- `metadata.rs` — distribution metadata parsing
+- `marker.rs` — PEP 508 marker evaluation
+- `model.rs` — resolved package result types
+- `error.rs` — resolution errors
+
+### `pyra-ui`
+
+Terminal presentation. Owns:
+
+- `terminal.rs` — terminal rendering engine
+- `output.rs` — output tree model, JSON envelope, status/exit formatting
+
+The only crate that touches terminal formatting and styles.
+
+## Command flow
+
+A typical command follows this path:
+
+- `main.rs`
+  - `Cli::parse()` *(pyra-cli: parse args)*
+  - `AppContext::discover()` *(pyra-core: build runtime context)*
+  - `commands::execute(command, &context)` *(pyra-cli: dispatch)*
+    - `pyra_project::service::*` *(pyra-project: domain logic)*
+      - `pyra_resolver::*` *(pyra-resolver: resolution (if needed))*
+      - `sync::lockfile::*` *(pyra-project: lock read/write)*
+      - `sync::install::*` *(pyra-project: environment reconciliation)*
+  - `CommandEnvelope::from_execution()` *(pyra-ui: format result)*
+  - `terminal.render()` or `terminal.render_json()` *(pyra-ui: output)*
+
+Domain crates return typed results. The CLI crate maps those results into presentation output. Terminal formatting never happens inside domain logic.
+
+## Key dependencies
+
+| Crate | Key dependencies |
+|-------|-----------------|
+| `pyra-cli` | `clap` |
+| `pyra-core` | `directories`, `camino` |
+| `pyra-errors` | `thiserror` |
+| `pyra-project` | `toml_edit`, `serde`, `sha2`, `tempfile` |
+| `pyra-python` | `reqwest`, `flate2`, `tar` |
+| `pyra-resolver` | `pubgrub`, `pep440_rs`, `pep508_rs`, `reqwest` |
+| `pyra-ui` | `anstream`, `serde_json` |

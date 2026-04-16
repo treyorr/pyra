@@ -21,6 +21,9 @@ pub struct Cli {
 pub enum Command {
     /// Manage Pyra-owned Python installations.
     Python(PythonArgs),
+    /// Manage the installed Pyra CLI binary.
+    #[command(name = "self")]
+    Self_(SelfArgs),
     /// Initialize a new Python project in the current directory.
     Init(InitArgs),
     /// Pin a managed Python version for the current project.
@@ -48,6 +51,21 @@ pub struct PythonArgs {
     #[command(subcommand)]
     pub command: PythonCommand,
 }
+
+#[derive(Debug, Args)]
+pub struct SelfArgs {
+    #[command(subcommand)]
+    pub command: SelfCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SelfCommand {
+    /// Update the installed Pyra binary from GitHub Releases.
+    Update(SelfUpdateArgs),
+}
+
+#[derive(Debug, Args, Default)]
+pub struct SelfUpdateArgs {}
 
 #[derive(Debug, Subcommand)]
 pub enum PythonCommand {

@@ -7,12 +7,13 @@ mod project_python;
 mod python;
 mod remove;
 mod run;
+mod self_update;
 mod sync;
 mod update;
 mod use_python;
 
 use pyra_core::AppContext;
-use pyra_errors::{ErrorReport, UserFacingError};
+use pyra_errors::{ErrorKind, ErrorReport, UserFacingError};
 use pyra_project::ProjectError;
 use pyra_python::PythonError;
 use pyra_ui::Output;
@@ -20,7 +21,7 @@ use thiserror::Error;
 
 use crate::cli::{
     AddArgs, Command, DoctorArgs, InitArgs, LockArgs, OutdatedArgs, PythonArgs, RemoveArgs,
-    RunArgs, SyncArgs, UpdateArgs, UseArgs,
+    RunArgs, SelfArgs, SyncArgs, UpdateArgs, UseArgs,
 };
 
 #[derive(Debug, Error)]
@@ -29,6 +30,51 @@ pub enum CommandError {
     Python(#[from] PythonError),
     #[error(transparent)]
     Project(#[from] ProjectError),
+    #[error(transparent)]
+    SelfUpdate(#[from] SelfUpdateError),
+}
+
+#[derive(Debug, Error)]
+pub enum SelfUpdateError {
+    #[error("Pyra could not prepare the self-update request.")]
+    Configure {
+        #[source]
+        source: ::self_update::errors::Error,
+    },
+    #[error("Pyra could not replace the installed binary.")]
+    Apply {
+        #[source]
+        source: ::self_update::errors::Error,
+    },
+}
+
+impl UserFacingError for SelfUpdateError {
+    fn report(&self) -> ErrorReport {
+        match self {
+            Self::Configure { source } => ErrorReport::new(
+                ErrorKind::System,
+                "Pyra could not contact the release backend for self-update.",
+            )
+            .with_detail(
+                "The GitHub Releases request could not be prepared or the release metadata could not be read.",
+            )
+            .with_suggestion(
+                "Check your network connection and release availability, then run `pyra self update` again.",
+            )
+            .with_verbose_detail(source.to_string()),
+            Self::Apply { source } => ErrorReport::new(
+                ErrorKind::System,
+                "Pyra could not install the updated binary in place.",
+            )
+            .with_detail(
+                "Pyra found release metadata but could not download or apply a compatible binary for this installation.",
+            )
+            .with_suggestion(
+                "Reinstall with `curl -fsSL https://tlo3.com/pyra-install.sh | sh` or adjust permissions for the existing install location.",
+            )
+            .with_verbose_detail(source.to_string()),
+        }
+    }
 }
 
 impl UserFacingError for CommandError {
@@ -36,6 +82,7 @@ impl UserFacingError for CommandError {
         match self {
             Self::Python(error) => error.report(),
             Self::Project(error) => error.report(),
+            Self::SelfUpdate(error) => error.report(),
         }
     }
 }
@@ -65,6 +112,9 @@ pub async fn execute(
 ) -> Result<CommandExecution, CommandError> {
     match command {
         Command::Python(args) => execute_python(args, context)
+            .await
+            .map(CommandExecution::success),
+        Command::Self_(args) => execute_self(args, context)
             .await
             .map(CommandExecution::success),
         Command::Init(args) => execute_init(args, context)
@@ -104,6 +154,10 @@ async fn execute_python(args: PythonArgs, context: &AppContext) -> Result<Output
 
 async fn execute_init(args: InitArgs, context: &AppContext) -> Result<Output, CommandError> {
     init::execute(args, context).await
+}
+
+async fn execute_self(args: SelfArgs, context: &AppContext) -> Result<Output, CommandError> {
+    self_update::execute(args, context).await
 }
 
 async fn execute_use(args: UseArgs, context: &AppContext) -> Result<Output, CommandError> {

@@ -1,5 +1,6 @@
 [tools]
 rust = "stable"
+node = "lts"
 
 [tasks.fmt]
 description = "Format the Rust workspace"
@@ -28,3 +29,23 @@ depends = ["fmt-check", "clippy", "test"]
 [tasks.build]
 description = "Build the Rust workspace"
 run = "cargo build --workspace"
+
+[tasks."docs:dev"]
+description = "Start the docs dev server"
+run = "npm run dev"
+dir = "docs"
+
+[tasks."docs:build"]
+description = "Build the docs site for production"
+run = "npm run build"
+dir = "docs"
+
+[tasks."docs:preview"]
+description = "Preview the built docs site"
+run = "npm run preview"
+dir = "docs"
+
+[tasks."docs:install"]
+description = "Install docs site dependencies"
+run = "npm install"
+dir = "docs"
