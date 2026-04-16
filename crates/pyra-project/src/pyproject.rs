@@ -80,6 +80,10 @@ impl LockTargetSet {
     pub fn len(&self) -> usize {
         self.targets.len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.targets.is_empty()
+    }
 }
 
 pub fn create_initial_pyproject(

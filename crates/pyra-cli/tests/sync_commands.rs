@@ -518,6 +518,9 @@ targets = ["{host_target}", "{foreign_target}"]
     let host_wheel_bytes = fixture_artifact_bytes(&host_wheel_name);
     let foreign_wheel_bytes = fixture_artifact_bytes(&foreign_wheel_name);
     let foreign_only_wheel_bytes = fixture_artifact_bytes(&foreign_only_wheel_name);
+    let foreign_only_sha256 = format!("{:x}", Sha256::digest(&foreign_only_wheel_bytes));
+    let foreign_sha256 = format!("{:x}", Sha256::digest(&foreign_wheel_bytes));
+    let host_sha256 = format!("{:x}", Sha256::digest(&host_wheel_bytes));
     fs::write(&host_wheel_path, &host_wheel_bytes).expect("host wheel");
     fs::write(&foreign_wheel_path, &foreign_wheel_bytes).expect("foreign shared wheel");
     fs::write(&foreign_only_wheel_path, &foreign_only_wheel_bytes).expect("foreign-only wheel");
@@ -583,13 +586,13 @@ resolution-strategy = "environment-scoped-matrix-v1"
             foreign_target = foreign_target,
             foreign_only_wheel_name = foreign_only_wheel_name,
             foreign_only_wheel_path = foreign_only_wheel_path.display(),
-            foreign_only_sha256 = format!("{:x}", Sha256::digest(&foreign_only_wheel_bytes)),
+            foreign_only_sha256 = foreign_only_sha256,
             foreign_wheel_name = foreign_wheel_name,
             foreign_wheel_path = foreign_wheel_path.display(),
-            foreign_sha256 = format!("{:x}", Sha256::digest(&foreign_wheel_bytes)),
+            foreign_sha256 = foreign_sha256,
             host_wheel_name = host_wheel_name,
             host_wheel_path = host_wheel_path.display(),
-            host_sha256 = format!("{:x}", Sha256::digest(&host_wheel_bytes)),
+            host_sha256 = host_sha256,
         ),
     )
     .expect("pylock");
@@ -3454,7 +3457,7 @@ fn fixture_project_json(package: &str, root: &Path) -> String {
         "files": [{
             "filename": file,
             "url": format!("file://{}", root.join("files").join(file).display()),
-            "hashes": {"sha256": format!("{:x}", Sha256::digest(&fixture_artifact_bytes(file)))},
+            "hashes": {"sha256": format!("{:x}", Sha256::digest(fixture_artifact_bytes(file)))},
             "core-metadata": true
         }]
     })
@@ -3475,7 +3478,7 @@ fn conflict_fixture_project_json(package: &str, root: &Path) -> String {
         "files": files.into_iter().map(|file| serde_json::json!({
             "filename": file,
             "url": format!("file://{}", root.join("files").join(file).display()),
-            "hashes": {"sha256": format!("{:x}", Sha256::digest(&fixture_artifact_bytes(file)))},
+            "hashes": {"sha256": format!("{:x}", Sha256::digest(fixture_artifact_bytes(file)))},
             "core-metadata": true
         })).collect::<Vec<_>>()
     })

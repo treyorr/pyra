@@ -28,6 +28,9 @@ mise install
 mise run verify
 ```
 
+`mise run verify` is the closest local match for the GitHub CI checks. If you
+only want the Rust gate, use `mise run verify:rust`.
+
 Useful commands:
 
 ```bash
@@ -35,6 +38,7 @@ mise run fmt
 mise run check
 mise run clippy
 mise run test
+mise run verify:rust
 mise run docs:install
 mise run docs:dev
 mise run docs:build

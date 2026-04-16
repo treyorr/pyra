@@ -32,10 +32,10 @@ use crate::{
         validate_project_requires_python,
     },
     sync::{
-        CURRENT_RESOLUTION_STRATEGY, EnvironmentInstaller, LockArtifact, LockDependencyRef,
-        LockEnvironment, LockFile, LockFreshness, LockMarker, LockMarkerClause, LockPackage,
-        LockSelection, MULTI_TARGET_RESOLUTION_STRATEGY, ProjectSyncInput, ProjectSyncInputLoader,
-        ReconciliationPlan, SyncSelectionRequest, SyncSelectionResolver,
+        ApplyEnvironmentRequest, CURRENT_RESOLUTION_STRATEGY, EnvironmentInstaller, LockArtifact,
+        LockDependencyRef, LockEnvironment, LockFile, LockFreshness, LockMarker, LockMarkerClause,
+        LockPackage, LockSelection, MULTI_TARGET_RESOLUTION_STRATEGY, ProjectSyncInput,
+        ProjectSyncInputLoader, ReconciliationPlan, SyncSelectionRequest, SyncSelectionResolver,
     },
     update::{UpdatePackageChange, UpdatePackageChangeKind, UpdateProjectOutcome},
 };
@@ -747,15 +747,15 @@ impl ProjectService {
             prepared.input.build_system_present,
         );
         let applied = EnvironmentInstaller
-            .apply(
-                &context.paths,
-                &environment.interpreter_path,
-                &prepared.input.project_root,
-                &prepared.input.project_name,
-                prepared.input.build_system_present,
-                &plan,
-                &selected_packages,
-            )
+            .apply(ApplyEnvironmentRequest {
+                paths: &context.paths,
+                interpreter: &environment.interpreter_path,
+                project_root: &prepared.input.project_root,
+                project_name: &prepared.input.project_name,
+                build_system_present: prepared.input.build_system_present,
+                plan: &plan,
+                packages: &selected_packages,
+            })
             .await?;
 
         Ok(SyncProjectOutcome {
@@ -928,8 +928,8 @@ fn collect_declared_package_intents(input: &ProjectSyncInput) -> Vec<DeclaredPac
     }
 
     grouped
-        .into_iter()
-        .map(|(_, accumulator)| accumulator.finish())
+        .into_values()
+        .map(|accumulator| accumulator.finish())
         .collect()
 }
 
@@ -1579,8 +1579,11 @@ mod tests {
         assert_eq!(latest.version, PythonVersion::parse("3.13.12").unwrap());
     }
 
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn sync_accepts_compatible_project_requires_python() {
+        // The installer stub uses a process-wide environment variable, so this
+        // test intentionally serializes access across the awaited sync.
         let _guard = installer_state_lock().lock().expect("installer state lock");
         let temp_dir = tempfile::tempdir().expect("temporary directory");
         let root = Utf8PathBuf::from_path_buf(temp_dir.path().join("workspace").join("sample"))
@@ -1612,8 +1615,11 @@ python = "3.13.12"
         assert!(root.join("pylock.toml").exists());
     }
 
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn sync_rejects_incompatible_project_requires_python_before_lock_reuse() {
+        // The installer stub uses a process-wide environment variable, so this
+        // test intentionally serializes access across the awaited sync.
         let _guard = installer_state_lock().lock().expect("installer state lock");
         let temp_dir = tempfile::tempdir().expect("temporary directory");
         let root = Utf8PathBuf::from_path_buf(temp_dir.path().join("workspace").join("sample"))
@@ -1653,8 +1659,11 @@ python = "3.13.12"
         assert!(!context.paths.project_environments_dir().exists());
     }
 
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn sync_locked_requires_existing_lock_before_resolution() {
+        // The installer stub uses a process-wide environment variable, so this
+        // test intentionally serializes access across the awaited sync.
         let _guard = installer_state_lock().lock().expect("installer state lock");
         let temp_dir = tempfile::tempdir().expect("temporary directory");
         let root = Utf8PathBuf::from_path_buf(temp_dir.path().join("workspace").join("sample"))

@@ -12,19 +12,23 @@ run = "cargo fmt --all --check"
 
 [tasks.check]
 description = "Compile the workspace"
-run = "cargo check --workspace"
+run = "cargo check --workspace --locked"
 
 [tasks.clippy]
 description = "Lint the workspace"
-run = "cargo clippy --workspace --all-targets -- -D warnings"
+run = "cargo clippy --workspace --all-targets --locked -- -D warnings"
 
 [tasks.test]
 description = "Run the Rust test suite"
-run = "cargo test --workspace"
+run = "cargo test --workspace --locked"
+
+[tasks."verify:rust"]
+description = "Run the Rust verification suite"
+depends = ["fmt-check", "clippy", "test"]
 
 [tasks.verify]
-description = "Run the standard local verification suite"
-depends = ["fmt-check", "clippy", "test"]
+description = "Run the local CI-style verification suite"
+depends = ["verify:rust", "docs:build"]
 
 [tasks.build]
 description = "Build the Rust workspace"

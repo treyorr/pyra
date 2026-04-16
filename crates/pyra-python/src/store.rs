@@ -68,7 +68,7 @@ impl PythonInstallStore {
             installations.push(record);
         }
 
-        installations.sort_by(|left, right| left.version.cmp(&right.version));
+        installations.sort_by_key(|installation| installation.version);
         Ok(installations)
     }
 

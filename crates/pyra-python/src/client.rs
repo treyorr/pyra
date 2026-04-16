@@ -1,5 +1,7 @@
 //! Live upstream catalog client for python-build-standalone releases.
 
+use std::cmp::Reverse;
+
 use serde::Deserialize;
 
 use crate::{ArchiveFormat, HostTarget, PythonError, PythonRelease, PythonVersion};
@@ -140,7 +142,7 @@ fn parse_release_body(body: &str, host: &HostTarget) -> Result<Vec<PythonRelease
         .into_iter()
         .filter_map(|asset| parse_asset(asset, host).transpose())
         .collect::<Result<Vec<_>, _>>()?;
-    releases.sort_by(|left, right| right.version.cmp(&left.version));
+    releases.sort_by_key(|release| Reverse(release.version));
     Ok(releases)
 }
 

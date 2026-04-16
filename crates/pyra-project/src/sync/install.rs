@@ -73,6 +73,19 @@ struct PreparedArtifact {
     path: Utf8PathBuf,
 }
 
+/// Groups the installer's stable runtime inputs so the async apply path keeps
+/// one explicit boundary instead of a long positional parameter list.
+#[derive(Debug, Clone, Copy)]
+pub struct ApplyEnvironmentRequest<'a> {
+    pub paths: &'a AppPaths,
+    pub interpreter: &'a Utf8Path,
+    pub project_root: &'a Utf8Path,
+    pub project_name: &'a str,
+    pub build_system_present: bool,
+    pub plan: &'a ReconciliationPlan,
+    pub packages: &'a [LockPackage],
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 pub struct EnvironmentInstaller;
 
@@ -104,14 +117,17 @@ impl EnvironmentInstaller {
 
     pub async fn apply(
         self,
-        paths: &AppPaths,
-        interpreter: &Utf8Path,
-        project_root: &Utf8Path,
-        project_name: &str,
-        build_system_present: bool,
-        plan: &ReconciliationPlan,
-        packages: &[LockPackage],
+        request: ApplyEnvironmentRequest<'_>,
     ) -> Result<ApplyReconciliationOutcome, ProjectError> {
+        let ApplyEnvironmentRequest {
+            paths,
+            interpreter,
+            project_root,
+            project_name,
+            build_system_present,
+            plan,
+            packages,
+        } = request;
         if let Ok(state_path) = std::env::var(STUB_STATE_ENV) {
             return apply_stub_state(
                 &state_path,
@@ -373,7 +389,7 @@ async fn prepare_install_artifacts(
         return Ok(BTreeMap::new());
     }
 
-    let concurrency = pending.len().min(MAX_PARALLEL_ARTIFACT_PREPARATIONS).max(1);
+    let concurrency = pending.len().clamp(1, MAX_PARALLEL_ARTIFACT_PREPARATIONS);
     let mut next_pending = pending.into_iter();
     let mut join_set: JoinSet<Result<PreparedArtifact, ProjectError>> = JoinSet::new();
 
