@@ -41,7 +41,7 @@ The selected dependency set determines what gets installed. Default:
 - `dev` group (if it exists)
 - No extras
 
-This can be overridden with `--group`, `--extra`, `--all-groups`, `--all-extras`, `--no-group`, `--no-dev`, `--only-group`, and `--only-dev` flags. See [Dependency Selection](/concepts/dependency-selection/) for full rules.
+This can be overridden with `--group`, `--extra`, `--all-groups`, `--all-extras`, `--no-group`, `--no-dev`, `--only-group`, and `--only-dev` flags. See [Dependency Selection](./dependency-selection/) for full rules.
 
 ## Step 3: Lock freshness
 
@@ -70,7 +70,7 @@ The result is written to `pylock.toml`.
 Current strategy identifier: `environment-scoped-union-v1`
 
 :::note
-Union resolution means Pyra solves all scopes together. Independently valid groups or extras may fail if they conflict when combined. This is a [known tradeoff](/roadmap/#known-tradeoffs).
+Union resolution means Pyra solves all scopes together. Independently valid groups or extras may fail if they conflict when combined. This is a [known tradeoff](../roadmap/#known-tradeoffs).
 :::
 
 ## Step 5: Reconciliation

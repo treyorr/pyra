@@ -271,7 +271,7 @@ Reports findings for:
 - **Stale lock** — lock freshness does not match current inputs
 - **Environment drift** — installed packages differ from the selected lock state
 
-Doctor never mutates `pyproject.toml`, `pylock.toml`, or the environment. See [Doctor Reference](/reference/doctor/) for details.
+Doctor never mutates `pyproject.toml`, `pylock.toml`, or the environment. See [Doctor Reference](./doctor/) for details.
 
 ---
 

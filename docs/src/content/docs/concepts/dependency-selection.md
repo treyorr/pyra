@@ -131,4 +131,4 @@ Pyra currently resolves all scopes (base, all groups, all extras) as one combine
 - Groups and extras that are independently valid may still fail if they require incompatible versions when solved together
 - This is stricter than the ideal model, but keeps the resolver and lock simple
 
-See [Sync Model](/concepts/sync-model/) for how this fits into the full pipeline.
+See [Sync Model](./sync-model/) for how this fits into the full pipeline.

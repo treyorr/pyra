@@ -143,7 +143,7 @@ Doctor reports actionable findings about interpreter state, lock freshness, and 
 
 ## Next steps
 
-- [Commands Reference](/reference/commands/) — full command documentation
-- [Sync Model](/concepts/sync-model/) — how the dependency pipeline works
-- [Dependency Selection](/concepts/dependency-selection/) — groups, extras, and selection flags
-- [Python Management](/concepts/python-management/) — version management in detail
+- [Commands Reference](../reference/commands/) — full command documentation
+- [Sync Model](../concepts/sync-model/) — how the dependency pipeline works
+- [Dependency Selection](../concepts/dependency-selection/) — groups, extras, and selection flags
+- [Python Management](../concepts/python-management/) — version management in detail
